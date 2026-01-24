@@ -50,21 +50,35 @@ npm run tauri dev
 npm run tauri build
 ```
 
-## 📦 CLI 使用
+## 📦 使用方式
+
+### GUI 模式
 
 ```bash
-# 启动 GUI
+# 启动图形界面
 xtools
+```
 
-# 串口终端 (普通模式)
-xtools serial -p COM3 -b 115200
+### CLI 交互式终端
 
-# 串口终端 (终端交互模式)
-xtools serial -p COM3 -b 115200 -t
+```bash
+# 启动 CLI 交互终端（支持 Tab 补全）
+xtools_cli
 
-# 显示帮助
-xtools --help
-xtools serial --help
+# 进入后可用命令：
+xtools> list                    # 列出串口
+xtools> connect COM3 115200     # 连接串口
+xtools> send Hello World        # 发送文本
+xtools> hex 48 65 6C 6C 6F     # 发送 HEX
+xtools> status                  # 查看状态
+xtools> disconnect              # 断开连接
+xtools> help                    # 查看帮助
+xtools> exit                    # 退出
+
+# 快捷键：
+#   Tab      - 命令自动补全
+#   ↑/↓      - 浏览历史命令
+#   Ctrl+C   - 退出
 ```
 
 ## 📁 项目结构

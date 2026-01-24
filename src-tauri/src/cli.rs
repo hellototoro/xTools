@@ -1,10 +1,473 @@
 use crate::serial::{self, SerialManager};
 use chrono::Local;
-use std::io::{self, BufRead, Read, Write};
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
+use std::borrow::Cow;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+// ============ 命令补全助手 ============
+
+struct XToolsHelper {
+    commands: Vec<String>,
+}
+
+impl XToolsHelper {
+    fn new() -> Self {
+        Self {
+            commands: vec![
+                "help".to_string(),
+                "list".to_string(),
+                "ls".to_string(),
+                "connect".to_string(),
+                "conn".to_string(),
+                "disconnect".to_string(),
+                "disc".to_string(),
+                "send".to_string(),
+                "s".to_string(),
+                "hex".to_string(),
+                "config".to_string(),
+                "cfg".to_string(),
+                "clear".to_string(),
+                "cls".to_string(),
+                "status".to_string(),
+                "st".to_string(),
+                "exit".to_string(),
+                "quit".to_string(),
+                "q".to_string(),
+            ],
+        }
+    }
+}
+
+impl Completer for XToolsHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let mut candidates = Vec::new();
+        let input = &line[..pos];
+        
+        // 如果是第一个单词，补全命令
+        if !input.contains(' ') {
+            for cmd in &self.commands {
+                if cmd.starts_with(input) {
+                    candidates.push(Pair {
+                        display: cmd.clone(),
+                        replacement: cmd.clone(),
+                    });
+                }
+            }
+        }
+        
+        Ok((0, candidates))
+    }
+}
+
+impl Hinter for XToolsHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        if line.is_empty() || pos < line.len() {
+            return None;
+        }
+        
+        let input = line.trim();
+        
+        // 简单的命令提示
+        for cmd in &self.commands {
+            if cmd.starts_with(input) && cmd != input {
+                return Some(cmd[input.len()..].to_string());
+            }
+        }
+        
+        None
+    }
+}
+
+impl Highlighter for XToolsHelper {}
+impl Validator for XToolsHelper {}
+impl Helper for XToolsHelper {}
+
+// ============ 交互式 REPL ============
+
+pub fn run_interactive_repl() {
+    print_banner();
+    
+    let manager = Arc::new(Mutex::new(SerialManager::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    let connected = Arc::new(AtomicBool::new(false));
+    
+    // 串口接收线程
+    let manager_rx = manager.clone();
+    let running_rx = running.clone();
+    let connected_rx = connected.clone();
+    
+    thread::spawn(move || {
+        while running_rx.load(Ordering::SeqCst) {
+            if connected_rx.load(Ordering::SeqCst) {
+                let mut mgr = manager_rx.lock().unwrap();
+                match mgr.read_available() {
+                    Ok(entries) => {
+                        for entry in entries {
+                            println!("\r\x1b[K[{}] RX: {}", entry.timestamp, entry.data.trim());
+                            // 不重新打印提示符，让 rustyline 处理
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+    
+    // 设置 Ctrl+C 处理
+    let running_ctrlc = running.clone();
+    ctrlc::set_handler(move || {
+        running_ctrlc.store(false, Ordering::SeqCst);
+        println!("\n收到中断信号，正在退出...");
+        std::process::exit(0);
+    })
+    .expect("设置 Ctrl+C 处理失败");
+    
+    // 创建 rustyline 编辑器
+    let helper = XToolsHelper::new();
+    let mut rl = Editor::new().expect("无法创建编辑器");
+    rl.set_helper(Some(helper));
+    
+    // 加载历史
+    let history_path = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("xtools")
+        .join("history.txt");
+    
+    let _ = rl.load_history(&history_path);
+    
+    // 主 REPL 循环
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+        
+        let readline = rl.readline("xtools> ");
+        
+        match readline {
+            Ok(line) => {
+                let input = line.trim();
+                if input.is_empty() {
+                    continue;
+                }
+                
+                // 添加到历史
+                rl.add_history_entry(input)
+                    .expect("添加历史失败");
+                
+                let result = handle_command(input, &manager, &connected);
+                
+                match result {
+                    CommandResult::Exit => {
+                        println!("再见！");
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    CommandResult::Success(msg) => {
+                        if !msg.is_empty() {
+                            println!("{}", msg);
+                        }
+                    }
+                    CommandResult::Error(err) => {
+                        println!("\x1b[31m错误: {}\x1b[0m", err);
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("退出");
+                break;
+            }
+            Err(err) => {
+                eprintln!("错误: {:?}", err);
+                break;
+            }
+        }
+    }
+    
+    // 保存历史
+    if let Some(parent) = history_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = rl.save_history(&history_path);
+}
+
+enum CommandResult {
+    Success(String),
+    Error(String),
+    Exit,
+}
+
+fn handle_command(
+    input: &str,
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.is_empty() {
+        return CommandResult::Success(String::new());
+    }
+    
+    let cmd = parts[0].to_lowercase();
+    let args = &parts[1..];
+    
+    match cmd.as_str() {
+        "help" | "h" | "?" => {
+            print_help();
+            CommandResult::Success(String::new())
+        }
+        
+        "list" | "ls" => {
+            cmd_list_ports()
+        }
+        
+        "connect" | "conn" => {
+            cmd_connect(args, manager, connected)
+        }
+        
+        "disconnect" | "disc" => {
+            cmd_disconnect(manager, connected)
+        }
+        
+        "send" | "s" => {
+            cmd_send(args, manager, connected)
+        }
+        
+        "hex" => {
+            cmd_send_hex(args, manager, connected)
+        }
+        
+        "config" | "cfg" => {
+            cmd_config(args)
+        }
+        
+        "clear" | "cls" => {
+            print!("\x1b[2J\x1b[1;1H");
+            CommandResult::Success(String::new())
+        }
+        
+        "status" | "st" => {
+            cmd_status(connected)
+        }
+        
+        "exit" | "quit" | "q" => {
+            CommandResult::Exit
+        }
+        
+        _ => {
+            CommandResult::Error(format!("未知命令: {}。输入 'help' 查看帮助", cmd))
+        }
+    }
+}
+
+fn cmd_list_ports() -> CommandResult {
+    match serial::list_available_ports() {
+        Ok(ports) => {
+            if ports.is_empty() {
+                CommandResult::Success("未检测到可用串口".to_string())
+            } else {
+                let mut output = String::from("\n可用串口:\n");
+                for (i, port) in ports.iter().enumerate() {
+                    output.push_str(&format!("  [{}] {} - {}\n", i + 1, port.name, port.description));
+                }
+                CommandResult::Success(output)
+            }
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+fn cmd_connect(
+    args: &[&str],
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    if args.is_empty() {
+        return CommandResult::Error("用法: connect <串口> [波特率]".to_string());
+    }
+    
+    let port = args[0];
+    let baud = if args.len() > 1 {
+        args[1].parse::<u32>().unwrap_or(115200)
+    } else {
+        115200
+    };
+    
+    let mut mgr = manager.lock().unwrap();
+    match mgr.connect(port, baud, 8, 1, "none") {
+        Ok(_) => {
+            connected.store(true, Ordering::SeqCst);
+            CommandResult::Success(format!("✓ 已连接到 {} @ {} bps", port, baud))
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+fn cmd_disconnect(
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    let mut mgr = manager.lock().unwrap();
+    match mgr.disconnect() {
+        Ok(_) => {
+            connected.store(false, Ordering::SeqCst);
+            CommandResult::Success("✓ 已断开连接".to_string())
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+fn cmd_send(
+    args: &[&str],
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    if !connected.load(Ordering::SeqCst) {
+        return CommandResult::Error("未连接到串口".to_string());
+    }
+    
+    if args.is_empty() {
+        return CommandResult::Error("用法: send <数据>".to_string());
+    }
+    
+    let data = args.join(" ");
+    let mut mgr = manager.lock().unwrap();
+    
+    match mgr.send(&format!("{}\r\n", data), false) {
+        Ok(_) => {
+            let now = Local::now();
+            let timestamp = now.format("%H:%M:%S%.3f").to_string();
+            CommandResult::Success(format!("[{}] TX: {}", timestamp, data))
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+fn cmd_send_hex(
+    args: &[&str],
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    if !connected.load(Ordering::SeqCst) {
+        return CommandResult::Error("未连接到串口".to_string());
+    }
+    
+    if args.is_empty() {
+        return CommandResult::Error("用法: hex <十六进制数据>".to_string());
+    }
+    
+    let data = args.join(" ");
+    let mut mgr = manager.lock().unwrap();
+    
+    match mgr.send(&data, true) {
+        Ok(_) => {
+            let now = Local::now();
+            let timestamp = now.format("%H:%M:%S%.3f").to_string();
+            CommandResult::Success(format!("[{}] TX HEX: {}", timestamp, data))
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+fn cmd_config(args: &[&str]) -> CommandResult {
+    if args.is_empty() {
+        let output = "
+配置选项:
+  baud <速率>     - 设置波特率 (默认: 115200)
+  data <位数>     - 设置数据位 (5-8)
+  stop <位数>     - 设置停止位 (1-2)
+  parity <类型>   - 设置校验 (none/odd/even)
+
+示例: config baud 9600
+";
+        return CommandResult::Success(output.to_string());
+    }
+    
+    // TODO: 实现配置功能
+    CommandResult::Success("配置已更新（功能待实现）".to_string())
+}
+
+fn cmd_status(connected: &Arc<AtomicBool>) -> CommandResult {
+    let status = if connected.load(Ordering::SeqCst) {
+        "\x1b[32m● 已连接\x1b[0m"
+    } else {
+        "\x1b[31m○ 未连接\x1b[0m"
+    };
+    CommandResult::Success(format!("状态: {}", status))
+}
+
+fn print_banner() {
+    println!(r#"
+    ╔═══════════════════════════════════════════════════╗
+    ║                                                   ║
+    ║      ⚡ xTools CLI - 交互式串口终端 v0.1.0       ║
+    ║                                                   ║
+    ║           🐱 按 Tab 键补全命令 🔌                 ║
+    ║                                                   ║
+    ╚═══════════════════════════════════════════════════╝
+
+    输入 'help' 查看可用命令
+    "#);
+}
+
+fn print_help() {
+    println!(r#"
+可用命令:
+
+  串口操作:
+    list, ls              - 列出可用串口
+    connect <串口> [波特率] - 连接串口 (如: connect COM3 115200)
+    disconnect, disc      - 断开串口连接
+    status, st           - 查看连接状态
+
+  数据收发:
+    send <数据>          - 发送文本数据 (自动添加 \r\n)
+    hex <十六进制>       - 发送十六进制数据 (如: hex 48 65 6C 6C 6F)
+
+  配置:
+    config, cfg          - 查看/设置串口参数
+
+  其他:
+    clear, cls           - 清屏
+    help, h, ?           - 显示帮助
+    exit, quit, q        - 退出程序
+
+快捷键:
+    Tab                  - 命令自动补全
+    Ctrl+C               - 中断/退出
+    ↑/↓                  - 浏览命令历史
+
+示例:
+    xtools> list
+    xtools> connect COM3 115200
+    xtools> send Hello World
+    xtools> hex 48 65 6C 6C 6F
+    xtools> disconnect
+    "#);
+}
+
+// ============ 旧版 CLI（兼容保留）============
 
 pub fn run_serial_cli(port: Option<String>, baud: u32, terminal_mode: bool) {
     println!("xTools 串口终端 v0.1.0");
@@ -55,195 +518,36 @@ pub fn run_serial_cli(port: Option<String>, baud: u32, terminal_mode: bool) {
 
     println!("已连接到 {} @ {} bps", port_name, baud);
     println!("模式: {}", if terminal_mode { "终端交互" } else { "普通" });
-    println!("提示: 输入 :q 退出, :h 显示帮助\n");
+    println!("提示: 按 Ctrl+C 退出\n");
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
     // 设置 Ctrl+C 处理
-    ctrlc_handler(r.clone());
-
-    if terminal_mode {
-        run_terminal_mode(manager, running);
-    } else {
-        run_normal_mode(manager, running);
-    }
-
-    println!("\n已断开连接");
-}
-
-fn run_terminal_mode(mut manager: SerialManager, running: Arc<AtomicBool>) {
-    println!("--- 终端模式 (输入直接发送，支持 ANSI 转义序列) ---\n");
-
-    // 接收线程
-    let running_rx = running.clone();
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-
-    thread::spawn(move || {
-        while running_rx.load(Ordering::SeqCst) {
-            match manager.read_available() {
-                Ok(entries) => {
-                    for entry in entries {
-                        print!("{}", entry.data);
-                        io::stdout().flush().unwrap();
-                    }
-                }
-                Err(_) => break,
-            }
-            
-            // 检查发送队列
-            if let Ok(data) = rx.try_recv() {
-                if let Err(e) = manager.send(&String::from_utf8_lossy(&data), false) {
-                    eprintln!("\n发送错误: {}", e);
-                }
-            }
-            
-            thread::sleep(Duration::from_millis(10));
-        }
+    let _ = ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        println!("\n收到中断信号，正在退出...");
     });
 
-    // 主线程处理输入
+    // 简单的数据接收循环
     let stdin = io::stdin();
-    let mut buffer = [0u8; 1];
-    
-    #[cfg(windows)]
-    {
-        // Windows 上使用行缓冲
-        for line in stdin.lock().lines() {
-            if !running.load(Ordering::SeqCst) {
-                break;
-            }
-            
-            match line {
-                Ok(text) => {
-                    if text == ":q" {
-                        running.store(false, Ordering::SeqCst);
-                        break;
-                    } else if text == ":h" {
-                        print_help();
-                        continue;
-                    }
-                    
-                    let mut data = text.into_bytes();
-                    data.push(b'\r');
-                    data.push(b'\n');
-                    let _ = tx.send(data);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // Unix 上可以读取单个字符
-        use std::os::unix::io::AsRawFd;
-        
-        for line in stdin.lock().lines() {
-            if !running.load(Ordering::SeqCst) {
-                break;
-            }
-            
-            match line {
-                Ok(text) => {
-                    if text == ":q" {
-                        running.store(false, Ordering::SeqCst);
-                        break;
-                    } else if text == ":h" {
-                        print_help();
-                        continue;
-                    }
-                    
-                    let mut data = text.into_bytes();
-                    data.push(b'\r');
-                    data.push(b'\n');
-                    let _ = tx.send(data);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-}
-
-fn run_normal_mode(mut manager: SerialManager, running: Arc<AtomicBool>) {
-    println!("--- 普通模式 (按行发送) ---\n");
-
-    let running_rx = running.clone();
-
-    // 接收线程
-    thread::spawn(move || {
-        while running_rx.load(Ordering::SeqCst) {
-            match manager.read_available() {
-                Ok(entries) => {
-                    for entry in entries {
-                        let now = Local::now();
-                        println!(
-                            "[{}] RX: {} | HEX: {}",
-                            entry.timestamp, entry.data.trim(), entry.hex
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("读取错误: {}", e);
-                    break;
-                }
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    });
-
-    // 主线程处理发送
-    let stdin = io::stdin();
-    let mut send_manager = SerialManager::new();
-    
-    // 这里需要重新连接因为 manager 被移动到线程中了
-    // 实际实现中应该使用 Arc<Mutex<SerialManager>>
-    
-    print!("> ");
-    io::stdout().flush().unwrap();
-    
-    for line in stdin.lock().lines() {
+    loop {
         if !running.load(Ordering::SeqCst) {
             break;
         }
 
-        match line {
-            Ok(text) => {
-                let text = text.trim();
-                
-                if text == ":q" {
-                    running.store(false, Ordering::SeqCst);
-                    break;
-                } else if text == ":h" {
-                    print_help();
-                } else if text.starts_with(":hex ") {
-                    let hex_data = &text[5..];
-                    println!("发送 HEX: {}", hex_data);
-                    // send_manager.send(hex_data, true);
-                } else if !text.is_empty() {
-                    println!("发送: {}", text);
-                    // send_manager.send(&format!("{}\r\n", text), false);
+        // 读取数据
+        match manager.read_available() {
+            Ok(entries) => {
+                for entry in entries {
+                    println!("[{}] RX: {}", entry.timestamp, entry.data.trim());
                 }
-
-                print!("> ");
-                io::stdout().flush().unwrap();
             }
-            Err(_) => break,
+            Err(_) => {}
         }
+
+        thread::sleep(Duration::from_millis(50));
     }
-}
 
-fn print_help() {
-    println!("\n命令帮助:");
-    println!("  :q          - 退出程序");
-    println!("  :h          - 显示帮助");
-    println!("  :hex <data> - 发送十六进制数据 (如 :hex 48 65 6C 6C 6F)");
-    println!("  其他输入    - 直接发送文本\n");
-}
-
-fn ctrlc_handler(running: Arc<AtomicBool>) {
-    let _ = ctrlc::set_handler(move || {
-        running.store(false, Ordering::SeqCst);
-        println!("\n收到中断信号，正在退出...");
-    });
+    println!("\n已断开连接");
 }

@@ -13,6 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "xtools"
 path = "src/main.rs"
 
+[[bin]]
+name = "xtools_cli"
+path = "src/main_cli.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -30,4 +34,5 @@ parking_lot = "0.12"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 ctrlc = "3"
+rustyline = "13"
 
