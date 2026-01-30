@@ -194,6 +194,10 @@ pub fn run_interactive_repl() {
                     CommandResult::Error(err) => {
                         println!("\x1b[31m错误: {}\x1b[0m", err);
                     }
+                    CommandResult::EnterTerminal => {
+                        // 连接成功，自动进入终端模式
+                        run_terminal_mode(&manager, &connected);
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -222,6 +226,7 @@ enum CommandResult {
     Success(String),
     Error(String),
     Exit,
+    EnterTerminal,  // 连接成功后进入终端模式
 }
 
 fn handle_command(
@@ -327,7 +332,8 @@ fn cmd_connect(
     match mgr.connect(port, baud, 8, 1, "none") {
         Ok(_) => {
             connected.store(true, Ordering::SeqCst);
-            CommandResult::Success(format!("✓ 已连接到 {} @ {} bps", port, baud))
+            println!("✓ 已连接到 {} @ {} bps", port, baud);
+            CommandResult::EnterTerminal
         }
         Err(e) => CommandResult::Error(e),
     }
@@ -399,30 +405,28 @@ fn cmd_send_hex(
     }
 }
 
-// 交互式终端模式 - 类似 minicom/screen
-fn cmd_terminal(
+// 运行交互式终端模式
+fn run_terminal_mode(
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
-) -> CommandResult {
-    if !connected.load(Ordering::SeqCst) {
-        return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
-    }
-    
+) {
     println!("\n\x1b[33m═══ 进入交互式终端模式 ═══\x1b[0m");
     println!("\x1b[90m提示: 按 Ctrl+] 退出终端模式\x1b[0m\n");
     
     // 使用 crossterm 启用原始模式（跨平台）
     if let Err(e) = enable_raw_mode() {
-        return CommandResult::Error(format!("无法启用原始模式: {}", e));
+        println!("\x1b[31m无法启用原始模式: {}\x1b[0m", e);
+        return;
     }
     
     let running = Arc::new(AtomicBool::new(true));
     let running_rx = running.clone();
     let manager_rx = manager.clone();
+    let connected_rx = connected.clone();
     
     // 接收线程 - 显示串口数据
     let rx_handle = thread::spawn(move || {
-        while running_rx.load(Ordering::SeqCst) {
+        while running_rx.load(Ordering::SeqCst) && connected_rx.load(Ordering::SeqCst) {
             let mut mgr = manager_rx.lock().unwrap();
             match mgr.read_available() {
                 Ok(entries) => {
@@ -485,7 +489,18 @@ fn cmd_terminal(
     let _ = rx_handle.join();
     
     println!("\n\x1b[33m═══ 已退出终端模式 ═══\x1b[0m\n");
+}
+
+// 交互式终端模式命令
+fn cmd_terminal(
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    if !connected.load(Ordering::SeqCst) {
+        return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
+    }
     
+    run_terminal_mode(manager, connected);
     CommandResult::Success(String::new())
 }
 
