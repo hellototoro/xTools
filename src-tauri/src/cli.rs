@@ -1,7 +1,7 @@
 use crate::serial::{self, SerialManager};
 use chrono::Local;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use rustyline::completion::{Completer, Pair};
@@ -456,6 +456,11 @@ fn run_terminal_mode(
     loop {
         if event::poll(Duration::from_millis(10)).unwrap_or(false) {
             if let Ok(Event::Key(key_event)) = event::read() {
+                // 只处理按下事件，忽略释放和重复事件
+                if key_event.kind != KeyEventKind::Press {
+                    continue;
+                }
+                
                 // Ctrl+] 退出
                 if key_event.modifiers.contains(KeyModifiers::CONTROL) 
                     && key_event.code == KeyCode::Char(']') 
