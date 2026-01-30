@@ -113,15 +113,18 @@ pub fn run_interactive_repl() {
     let manager = Arc::new(Mutex::new(SerialManager::new()));
     let running = Arc::new(AtomicBool::new(true));
     let connected = Arc::new(AtomicBool::new(false));
+    let in_terminal_mode = Arc::new(AtomicBool::new(false));  // 终端模式标志
     
-    // 串口接收线程
+    // 串口接收线程（仅在非终端模式时显示）
     let manager_rx = manager.clone();
     let running_rx = running.clone();
     let connected_rx = connected.clone();
+    let in_terminal_rx = in_terminal_mode.clone();
     
     thread::spawn(move || {
         while running_rx.load(Ordering::SeqCst) {
-            if connected_rx.load(Ordering::SeqCst) {
+            // 终端模式时不在这里处理数据
+            if connected_rx.load(Ordering::SeqCst) && !in_terminal_rx.load(Ordering::SeqCst) {
                 let mut mgr = manager_rx.lock().unwrap();
                 match mgr.read_available() {
                     Ok(entries) => {
@@ -178,7 +181,7 @@ pub fn run_interactive_repl() {
                 rl.add_history_entry(input)
                     .expect("添加历史失败");
                 
-                let result = handle_command(input, &manager, &connected);
+                let result = handle_command(input, &manager, &connected, &in_terminal_mode);
                 
                 match result {
                     CommandResult::Exit => {
@@ -196,7 +199,7 @@ pub fn run_interactive_repl() {
                     }
                     CommandResult::EnterTerminal => {
                         // 连接成功，自动进入终端模式
-                        run_terminal_mode(&manager, &connected);
+                        run_terminal_mode(&manager, &connected, &in_terminal_mode);
                     }
                 }
             }
@@ -233,6 +236,7 @@ fn handle_command(
     input: &str,
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
+    in_terminal_mode: &Arc<AtomicBool>,
 ) -> CommandResult {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
@@ -269,7 +273,7 @@ fn handle_command(
         }
         
         "terminal" | "term" => {
-            cmd_terminal(manager, connected)
+            cmd_terminal(manager, connected, in_terminal_mode)
         }
         
         "config" | "cfg" => {
@@ -409,13 +413,18 @@ fn cmd_send_hex(
 fn run_terminal_mode(
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
+    in_terminal_mode: &Arc<AtomicBool>,
 ) {
+    // 标记进入终端模式，暂停主 REPL 的接收线程
+    in_terminal_mode.store(true, Ordering::SeqCst);
+    
     println!("\n\x1b[33m═══ 进入交互式终端模式 ═══\x1b[0m");
     println!("\x1b[90m提示: 按 Ctrl+] 退出终端模式\x1b[0m\n");
     
     // 使用 crossterm 启用原始模式（跨平台）
     if let Err(e) = enable_raw_mode() {
         println!("\x1b[31m无法启用原始模式: {}\x1b[0m", e);
+        in_terminal_mode.store(false, Ordering::SeqCst);
         return;
     }
     
@@ -488,6 +497,9 @@ fn run_terminal_mode(
     let _ = disable_raw_mode();
     let _ = rx_handle.join();
     
+    // 退出终端模式
+    in_terminal_mode.store(false, Ordering::SeqCst);
+    
     println!("\n\x1b[33m═══ 已退出终端模式 ═══\x1b[0m\n");
 }
 
@@ -495,12 +507,13 @@ fn run_terminal_mode(
 fn cmd_terminal(
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
+    in_terminal_mode: &Arc<AtomicBool>,
 ) -> CommandResult {
     if !connected.load(Ordering::SeqCst) {
         return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
     }
     
-    run_terminal_mode(manager, connected);
+    run_terminal_mode(manager, connected, in_terminal_mode);
     CommandResult::Success(String::new())
 }
 
