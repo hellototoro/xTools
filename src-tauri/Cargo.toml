@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "xTools - 跨平台超级工具集"
 authors = ["you"]
 edition = "2021"
+default-run = "xtools"
 
 [lib]
 name = "xtools_lib"

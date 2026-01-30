@@ -6,7 +6,6 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
-use std::borrow::Cow;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -530,7 +529,7 @@ pub fn run_serial_cli(port: Option<String>, baud: u32, terminal_mode: bool) {
     });
 
     // 简单的数据接收循环
-    let stdin = io::stdin();
+    let _stdin = io::stdin();
     loop {
         if !running.load(Ordering::SeqCst) {
             break;

@@ -12,6 +12,8 @@ pub struct AppConfig {
 pub struct SerialConfig {
     pub port: String,
     pub baud_rate: u32,
+    #[serde(default)]
+    pub custom_baud_rate: u32,
     pub data_bits: u8,
     pub stop_bits: u8,
     pub parity: String,
@@ -35,6 +37,7 @@ impl Default for AppConfig {
             serial: SerialConfig {
                 port: String::new(),
                 baud_rate: 115200,
+                custom_baud_rate: 0,
                 data_bits: 8,
                 stop_bits: 1,
                 parity: "none".to_string(),

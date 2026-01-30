@@ -18,6 +18,7 @@ interface DataEntry {
 interface SerialConfig {
   port: string;
   baud_rate: number;
+  custom_baud_rate: number;
   data_bits: number;
   stop_bits: number;
   parity: string;
@@ -47,11 +48,13 @@ const sendText = ref("");
 const searchText = ref("");
 const showSearch = ref(false);
 const searchIndex = ref(-1);
+const customBaudRate = ref(false);
 
 const config = ref<AppConfig>({
   serial: {
     port: "",
     baud_rate: 115200,
+    custom_baud_rate: 0,
     data_bits: 8,
     stop_bits: 1,
     parity: "none",
@@ -78,6 +81,8 @@ const newlineOptions = [
 
 let pollInterval: number | null = null;
 const terminalRef = ref<HTMLDivElement | null>(null);
+const terminalInputRef = ref<HTMLInputElement | null>(null);
+const terminalBuffer = ref("");
 
 // Computed
 const filteredLog = computed(() => {
@@ -211,6 +216,51 @@ function scrollToBottom() {
 
 function clearLog() {
   dataLog.value = [];
+  terminalBuffer.value = "";
+}
+
+// 终端模式：直接发送字符
+async function handleTerminalInput(e: KeyboardEvent) {
+  if (!connected.value || !config.value.display.terminal_mode) return;
+  
+  e.preventDefault();
+  let char = "";
+  
+  if (e.key === "Enter") {
+    char = "\r";
+  } else if (e.key === "Backspace") {
+    char = "\x7f"; // DEL character
+  } else if (e.key.length === 1) {
+    char = e.key;
+  } else if (e.ctrlKey && e.key.toLowerCase() >= "a" && e.key.toLowerCase() <= "z") {
+    // Ctrl+A to Ctrl+Z
+    char = String.fromCharCode(e.key.toLowerCase().charCodeAt(0) - 96);
+  } else {
+    return;
+  }
+  
+  try {
+    await invoke("send_data", {
+      data: char,
+      hexMode: false,
+    });
+    
+    // 本地回显（如果需要）
+    terminalBuffer.value += char;
+  } catch (err) {
+    console.error("发送失败:", err);
+  }
+}
+
+function focusTerminal() {
+  if (config.value.display.terminal_mode && terminalInputRef.value && connected.value) {
+    // 只在终端模式且已连接时才自动聚焦，且不要从其他输入框抢焦点
+    const activeEl = document.activeElement;
+    const isOtherInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT');
+    if (!isOtherInput) {
+      terminalInputRef.value.focus();
+    }
+  }
 }
 
 async function saveLog() {
@@ -253,6 +303,13 @@ async function saveConfig() {
 
 // 自动保存配置
 watch(config, () => saveConfig(), { deep: true });
+
+// 终端模式切换时自动聚焦
+watch(() => config.value.display.terminal_mode, (newVal) => {
+  if (newVal) {
+    nextTick(() => focusTerminal());
+  }
+});
 
 // Keyboard shortcuts
 function handleKeydown(e: KeyboardEvent) {
@@ -322,9 +379,25 @@ onUnmounted(() => {
 
           <div class="form-group">
             <label>波特率</label>
-            <select v-model="config.serial.baud_rate" :disabled="connected">
-              <option v-for="b in baudRates" :key="b" :value="b">{{ b }}</option>
-            </select>
+            <div class="baud-select">
+              <select
+                :value="customBaudRate ? -1 : (baudRates.includes(config.serial.baud_rate) ? config.serial.baud_rate : -1)"
+                :disabled="connected"
+                @change="e => { const v = parseInt((e.target as HTMLSelectElement).value); if (v === -1) { customBaudRate = true; if (config.serial.custom_baud_rate > 0) config.serial.baud_rate = config.serial.custom_baud_rate; } else { config.serial.baud_rate = v; customBaudRate = false; } }"
+              >
+                <option v-for="b in baudRates" :key="b" :value="b">{{ b }}</option>
+                <option :value="-1">自定义...</option>
+              </select>
+            </div>
+            <input
+              v-if="customBaudRate || !baudRates.includes(config.serial.baud_rate)"
+              class="custom-baud-input"
+              type="text"
+              :value="config.serial.baud_rate > 0 && !baudRates.includes(config.serial.baud_rate) ? config.serial.baud_rate : (config.serial.custom_baud_rate > 0 ? config.serial.custom_baud_rate : '')"
+              @input="e => { const v = parseInt((e.target as HTMLInputElement).value); if (!isNaN(v) && v > 0) { config.serial.baud_rate = v; config.serial.custom_baud_rate = v; } }"
+              :disabled="connected"
+              placeholder="输入自定义波特率"
+            />
           </div>
 
           <div class="form-row">
@@ -424,23 +497,42 @@ onUnmounted(() => {
         <div
           ref="terminalRef"
           class="terminal"
+          :class="{ 'terminal-interactive': config.display.terminal_mode }"
           :style="{ fontSize: config.display.font_size + 'px' }"
           tabindex="0"
+          @click="focusTerminal"
         >
-          <div
-            v-for="(entry, i) in filteredLog"
-            :key="i"
-            class="log-entry"
-            :class="[entry.direction, { highlight: searchText && (entry.data.toLowerCase().includes(searchText.toLowerCase()) || entry.hex.toLowerCase().includes(searchText.toLowerCase())) }]"
-          >
-            <span v-if="config.display.show_timestamp" class="timestamp">[{{ entry.timestamp }}]</span>
-            <span class="direction">{{ entry.direction === "tx" ? "TX" : "RX" }}:</span>
-            <span class="data">{{ entry.data }}</span>
-            <span v-if="config.display.show_hex" class="hex">| {{ entry.hex }}</span>
-          </div>
-          <div v-if="dataLog.length === 0" class="empty-hint">
+          <!-- 传统日志模式 -->
+          <template v-if="!config.display.terminal_mode">
+            <div
+              v-for="(entry, i) in filteredLog"
+              :key="i"
+              class="log-entry"
+              :class="[entry.direction, { highlight: searchText && (entry.data.toLowerCase().includes(searchText.toLowerCase()) || entry.hex.toLowerCase().includes(searchText.toLowerCase())) }]"
+            >
+              <span v-if="config.display.show_timestamp" class="timestamp">[{{ entry.timestamp }}]</span>
+              <span class="direction">{{ entry.direction === "tx" ? "TX" : "RX" }}:</span>
+              <span class="data">{{ entry.data }}</span>
+              <span v-if="config.display.show_hex" class="hex">| {{ entry.hex }}</span>
+            </div>
+          </template>
+          <!-- 交互式终端模式 -->
+          <template v-else>
+            <span class="terminal-content">{{ dataLog.map(e => e.data).join('') }}</span><span class="cursor">▌</span>
+          </template>
+          <div v-if="dataLog.length === 0 && !config.display.terminal_mode" class="empty-hint">
             等待数据...
           </div>
+          <div v-if="config.display.terminal_mode && !connected" class="empty-hint">
+            请先连接串口，然后点击此处开始输入...
+          </div>
+          <!-- 隐藏的输入框用于捕获键盘输入 -->
+          <input
+            v-if="config.display.terminal_mode"
+            ref="terminalInputRef"
+            class="terminal-hidden-input"
+            @keydown="handleTerminalInput"
+          />
         </div>
 
         <!-- 底部工具栏 -->
@@ -568,21 +660,21 @@ body {
 .panel {
   background: var(--bg-tertiary);
   border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
+  padding: 10px;
+  margin-bottom: 10px;
 }
 
 .panel h3 {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
 .form-group {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .form-group label {
@@ -593,7 +685,8 @@ body {
 }
 
 .form-group select,
-.form-group input[type="text"] {
+.form-group input[type="text"],
+.form-group input[type="number"] {
   width: 100%;
   padding: 8px;
   background: var(--bg-primary);
@@ -601,10 +694,34 @@ body {
   border-radius: 4px;
   color: var(--text-primary);
   font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
-.form-group select:disabled {
+.form-group select:disabled,
+.form-group input:disabled {
   opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.baud-select {
+  display: flex;
+  gap: 4px;
+}
+
+.baud-select select {
+  flex: 1;
+}
+
+.custom-baud-input {
+  margin-top: 4px;
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
 }
 
 .form-row {
@@ -881,6 +998,34 @@ body {
 .btn-send {
   width: 80px;
   height: 80px;
+}
+
+/* Interactive Terminal Mode */
+.terminal-interactive {
+  cursor: text;
+}
+
+.terminal-content {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.cursor {
+  animation: blink 1s step-end infinite;
+  color: var(--accent);
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.terminal-hidden-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
 }
 
 /* Scrollbar */

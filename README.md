@@ -42,6 +42,7 @@ npm install
 
 ```bash
 npm run tauri dev
+cargo run --bin xtools_cli - 启动 CLI 版本（在 src-tauri 目录）
 ```
 
 ### 构建发布
