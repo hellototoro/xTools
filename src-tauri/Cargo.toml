@@ -36,4 +36,5 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 ctrlc = "3"
 rustyline = "13"
+crossterm = "0.28"
 

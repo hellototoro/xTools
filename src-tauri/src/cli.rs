@@ -1,5 +1,9 @@
 use crate::serial::{self, SerialManager};
 use chrono::Local;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -32,6 +36,8 @@ impl XToolsHelper {
                 "send".to_string(),
                 "s".to_string(),
                 "hex".to_string(),
+                "terminal".to_string(),
+                "term".to_string(),
                 "config".to_string(),
                 "cfg".to_string(),
                 "clear".to_string(),
@@ -257,6 +263,10 @@ fn handle_command(
             cmd_send_hex(args, manager, connected)
         }
         
+        "terminal" | "term" => {
+            cmd_terminal(manager, connected)
+        }
+        
         "config" | "cfg" => {
             cmd_config(args)
         }
@@ -389,6 +399,96 @@ fn cmd_send_hex(
     }
 }
 
+// 交互式终端模式 - 类似 minicom/screen
+fn cmd_terminal(
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+) -> CommandResult {
+    if !connected.load(Ordering::SeqCst) {
+        return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
+    }
+    
+    println!("\n\x1b[33m═══ 进入交互式终端模式 ═══\x1b[0m");
+    println!("\x1b[90m提示: 按 Ctrl+] 退出终端模式\x1b[0m\n");
+    
+    // 使用 crossterm 启用原始模式（跨平台）
+    if let Err(e) = enable_raw_mode() {
+        return CommandResult::Error(format!("无法启用原始模式: {}", e));
+    }
+    
+    let running = Arc::new(AtomicBool::new(true));
+    let running_rx = running.clone();
+    let manager_rx = manager.clone();
+    
+    // 接收线程 - 显示串口数据
+    let rx_handle = thread::spawn(move || {
+        while running_rx.load(Ordering::SeqCst) {
+            let mut mgr = manager_rx.lock().unwrap();
+            match mgr.read_available() {
+                Ok(entries) => {
+                    for entry in entries {
+                        // 直接输出数据，不添加时间戳
+                        print!("{}", entry.data);
+                        let _ = io::stdout().flush();
+                    }
+                }
+                Err(_) => {}
+            }
+            drop(mgr);
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    
+    // 主循环 - 读取键盘输入并发送 (使用 crossterm 跨平台)
+    loop {
+        if event::poll(Duration::from_millis(10)).unwrap_or(false) {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                // Ctrl+] 退出
+                if key_event.modifiers.contains(KeyModifiers::CONTROL) 
+                    && key_event.code == KeyCode::Char(']') 
+                {
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+                
+                let data = match key_event.code {
+                    KeyCode::Enter => "\r".to_string(),
+                    KeyCode::Backspace => "\x7f".to_string(),
+                    KeyCode::Tab => "\t".to_string(),
+                    KeyCode::Esc => "\x1b".to_string(),
+                    KeyCode::Up => "\x1b[A".to_string(),
+                    KeyCode::Down => "\x1b[B".to_string(),
+                    KeyCode::Right => "\x1b[C".to_string(),
+                    KeyCode::Left => "\x1b[D".to_string(),
+                    KeyCode::Home => "\x1b[H".to_string(),
+                    KeyCode::End => "\x1b[F".to_string(),
+                    KeyCode::Delete => "\x1b[3~".to_string(),
+                    KeyCode::Char(c) => {
+                        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                            // Ctrl+字母 转换为控制字符
+                            let ctrl_char = (c as u8 & 0x1f) as char;
+                            ctrl_char.to_string()
+                        } else {
+                            c.to_string()
+                        }
+                    }
+                    _ => continue,
+                };
+                
+                let mut mgr = manager.lock().unwrap();
+                let _ = mgr.send(&data, false);
+            }
+        }
+    }
+    
+    let _ = disable_raw_mode();
+    let _ = rx_handle.join();
+    
+    println!("\n\x1b[33m═══ 已退出终端模式 ═══\x1b[0m\n");
+    
+    CommandResult::Success(String::new())
+}
+
 fn cmd_config(args: &[&str]) -> CommandResult {
     if args.is_empty() {
         let output = "
@@ -443,6 +543,7 @@ fn print_help() {
   数据收发:
     send <数据>          - 发送文本数据 (自动添加 \r\n)
     hex <十六进制>       - 发送十六进制数据 (如: hex 48 65 6C 6C 6F)
+    terminal, term       - 进入交互式终端模式 (按 Ctrl+] 退出)
 
   配置:
     config, cfg          - 查看/设置串口参数
@@ -460,6 +561,7 @@ fn print_help() {
 示例:
     xtools> list
     xtools> connect COM3 115200
+    xtools> terminal              # 进入交互式终端
     xtools> send Hello World
     xtools> hex 48 65 6C 6C 6F
     xtools> disconnect
