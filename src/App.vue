@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 // Types
 interface PortInfo {
@@ -81,8 +84,9 @@ const newlineOptions = [
 
 let pollInterval: number | null = null;
 const terminalRef = ref<HTMLDivElement | null>(null);
-const terminalInputRef = ref<HTMLInputElement | null>(null);
-const terminalBuffer = ref("");
+const xtermContainerRef = ref<HTMLDivElement | null>(null);
+let xterm: Terminal | null = null;
+let fitAddon: FitAddon | null = null;
 
 // Computed
 const filteredLog = computed(() => {
@@ -138,6 +142,12 @@ function startPolling() {
       const entries = await invoke<DataEntry[]>("read_data");
       if (entries.length > 0) {
         dataLog.value.push(...entries);
+        // 写入 xterm 终端
+        for (const entry of entries) {
+          if (entry.direction === 'rx') {
+            writeToXterm(entry.data);
+          }
+        }
         if (config.value.display.auto_scroll) {
           scrollToBottom();
         }
@@ -216,50 +226,68 @@ function scrollToBottom() {
 
 function clearLog() {
   dataLog.value = [];
-  terminalBuffer.value = "";
-}
-
-// 终端模式：直接发送字符
-async function handleTerminalInput(e: KeyboardEvent) {
-  if (!connected.value || !config.value.display.terminal_mode) return;
-  
-  e.preventDefault();
-  let char = "";
-  
-  if (e.key === "Enter") {
-    char = "\r";
-  } else if (e.key === "Backspace") {
-    char = "\x7f"; // DEL character
-  } else if (e.key.length === 1) {
-    char = e.key;
-  } else if (e.ctrlKey && e.key.toLowerCase() >= "a" && e.key.toLowerCase() <= "z") {
-    // Ctrl+A to Ctrl+Z
-    char = String.fromCharCode(e.key.toLowerCase().charCodeAt(0) - 96);
-  } else {
-    return;
-  }
-  
-  try {
-    await invoke("send_data", {
-      data: char,
-      hexMode: false,
-    });
-    
-    // 本地回显（如果需要）
-    terminalBuffer.value += char;
-  } catch (err) {
-    console.error("发送失败:", err);
+  if (xterm) {
+    xterm.clear();
   }
 }
 
-function focusTerminal() {
-  if (config.value.display.terminal_mode && terminalInputRef.value && connected.value) {
-    // 只在终端模式且已连接时才自动聚焦，且不要从其他输入框抢焦点
-    const activeEl = document.activeElement;
-    const isOtherInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT');
-    if (!isOtherInput) {
-      terminalInputRef.value.focus();
+// 初始化 xterm.js 终端
+function initXterm() {
+  if (xterm || !xtermContainerRef.value) return;
+  
+  xterm = new Terminal({
+    fontSize: config.value.display.font_size,
+    fontFamily: '"Cascadia Code", "Fira Code", Consolas, monospace',
+    theme: {
+      background: '#1a1a2e',
+      foreground: '#e4e4e7',
+      cursor: '#a78bfa',
+      cursorAccent: '#1a1a2e',
+      selectionBackground: 'rgba(167, 139, 250, 0.3)',
+    },
+    cursorBlink: true,
+    convertEol: true,
+    allowProposedApi: true,
+  });
+  
+  fitAddon = new FitAddon();
+  xterm.loadAddon(fitAddon);
+  xterm.open(xtermContainerRef.value);
+  fitAddon.fit();
+  
+  // 监听用户输入，发送到串口
+  xterm.onData(async (data) => {
+    if (!connected.value) return;
+    try {
+      await invoke("send_data", { data, hexMode: false });
+    } catch (err) {
+      console.error("发送失败:", err);
     }
+  });
+  
+  // 监听窗口大小变化
+  window.addEventListener('resize', handleResize);
+}
+
+function handleResize() {
+  if (fitAddon && xterm) {
+    fitAddon.fit();
+  }
+}
+
+function disposeXterm() {
+  window.removeEventListener('resize', handleResize);
+  if (xterm) {
+    xterm.dispose();
+    xterm = null;
+  }
+  fitAddon = null;
+}
+
+// 写入数据到 xterm
+function writeToXterm(data: string) {
+  if (xterm && config.value.display.terminal_mode) {
+    xterm.write(data);
   }
 }
 
@@ -304,13 +332,6 @@ async function saveConfig() {
 // 自动保存配置
 watch(config, () => saveConfig(), { deep: true });
 
-// 终端模式切换时自动聚焦
-watch(() => config.value.display.terminal_mode, (newVal) => {
-  if (newVal) {
-    nextTick(() => focusTerminal());
-  }
-});
-
 // Keyboard shortcuts
 function handleKeydown(e: KeyboardEvent) {
   if (e.ctrlKey && e.key === "f") {
@@ -318,6 +339,16 @@ function handleKeydown(e: KeyboardEvent) {
     showSearch.value = !showSearch.value;
     if (!showSearch.value) {
       searchText.value = "";
+    }
+  }
+  // 全局 Ctrl+C 处理（用于终端区域的文本选择）
+  if (e.ctrlKey && (e.key === "c" || e.key === "C")) {
+    const selection = window.getSelection();
+    const selectedText = selection ? selection.toString() : '';
+    if (selectedText.length > 0) {
+      e.preventDefault();
+      navigator.clipboard.writeText(selectedText);
+      selection?.removeAllRanges();
     }
   }
 }
@@ -337,11 +368,33 @@ onMounted(async () => {
   await loadConfig();
   await refreshPorts();
   document.addEventListener("keydown", handleKeydown);
+  // 如果启动时就是终端模式，初始化 xterm
+  if (config.value.display.terminal_mode) {
+    nextTick(() => initXterm());
+  }
 });
 
 onUnmounted(() => {
   stopPolling();
+  disposeXterm();
   document.removeEventListener("keydown", handleKeydown);
+});
+
+// 监听终端模式切换
+watch(() => config.value.display.terminal_mode, (newVal) => {
+  if (newVal) {
+    nextTick(() => initXterm());
+  } else {
+    disposeXterm();
+  }
+});
+
+// 监听字体大小变化
+watch(() => config.value.display.font_size, (newVal) => {
+  if (xterm) {
+    xterm.options.fontSize = newVal;
+    if (fitAddon) fitAddon.fit();
+  }
 });
 </script>
 
@@ -499,8 +552,6 @@ onUnmounted(() => {
           class="terminal"
           :class="{ 'terminal-interactive': config.display.terminal_mode }"
           :style="{ fontSize: config.display.font_size + 'px' }"
-          tabindex="0"
-          @click="focusTerminal"
         >
           <!-- 传统日志模式 -->
           <template v-if="!config.display.terminal_mode">
@@ -516,23 +567,18 @@ onUnmounted(() => {
               <span v-if="config.display.show_hex" class="hex">| {{ entry.hex }}</span>
             </div>
           </template>
-          <!-- 交互式终端模式 -->
-          <template v-else>
-            <span class="terminal-content">{{ dataLog.map(e => e.data).join('') }}</span><span class="cursor">▌</span>
-          </template>
+          <!-- xterm 终端容器 -->
+          <div 
+            v-show="config.display.terminal_mode" 
+            ref="xtermContainerRef" 
+            class="xterm-container"
+          ></div>
           <div v-if="dataLog.length === 0 && !config.display.terminal_mode" class="empty-hint">
             等待数据...
           </div>
-          <div v-if="config.display.terminal_mode && !connected" class="empty-hint">
-            请先连接串口，然后点击此处开始输入...
+          <div v-if="config.display.terminal_mode && !connected" class="empty-hint xterm-hint">
+            请先连接串口...
           </div>
-          <!-- 隐藏的输入框用于捕获键盘输入 -->
-          <input
-            v-if="config.display.terminal_mode"
-            ref="terminalInputRef"
-            class="terminal-hidden-input"
-            @keydown="handleTerminalInput"
-          />
         </div>
 
         <!-- 底部工具栏 -->
@@ -867,6 +913,7 @@ body {
 /* Terminal */
 .terminal {
   flex: 1;
+  position: relative;
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1002,30 +1049,20 @@ body {
 
 /* Interactive Terminal Mode */
 .terminal-interactive {
-  cursor: text;
+  padding: 0 !important;
 }
 
-.terminal-content {
-  white-space: pre-wrap;
-  word-break: break-all;
+.xterm-container {
+  width: 100%;
+  height: 100%;
 }
 
-.cursor {
-  animation: blink 1s step-end infinite;
-  color: var(--accent);
-}
-
-@keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
-}
-
-.terminal-hidden-input {
+.xterm-hint {
   position: absolute;
-  left: -9999px;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
 }
 
 /* Scrollbar */
