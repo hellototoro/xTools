@@ -265,6 +265,56 @@ function initXterm() {
     }
   });
   
+  // 自定义键盘事件处理器 - 在 xterm 处理之前拦截特殊快捷键
+  xterm.attachCustomKeyEventHandler((e) => {
+    // Ctrl+C - 复制选中文本
+    if (e.ctrlKey && e.key === 'c' && e.type === 'keydown') {
+      const selection = xterm?.getSelection();
+      if (selection && selection.trim().length > 0) {
+        e.preventDefault();
+        navigator.clipboard.writeText(selection).then(() => {
+          xterm?.clearSelection();
+          console.log('已复制到剪贴板:', selection);
+        }).catch(err => {
+          console.error('复制失败:', err);
+        });
+        return false; // 阻止 xterm 处理此事件
+      }
+      // 没有选中文本，让 xterm 处理 Ctrl+C（发送中断信号）
+      return true;
+    }
+    
+    // Ctrl+V - 粘贴
+    if (e.ctrlKey && e.key === 'v' && e.type === 'keydown') {
+      e.preventDefault();
+      navigator.clipboard.readText().then(async (text) => {
+        if (text) {
+          try {
+            await invoke("send_data", { data: text, hexMode: false });
+            console.log('已粘贴:', text);
+          } catch (err) {
+            console.error('粘贴失败:', err);
+          }
+        }
+      }).catch(err => {
+        console.error('读取剪贴板失败:', err);
+      });
+      return false; // 阻止 xterm 处理此事件
+    }
+    
+    // 其他按键让 xterm 正常处理
+    return true;
+  });
+  
+  // 监听选择变化事件（用于调试）
+  xterm.onSelectionChange(() => {
+    if (!xterm) return;
+    const selection = xterm.getSelection();
+    if (selection && selection.trim().length > 0) {
+      console.log('选中了文本:', selection);
+    }
+  });
+  
   // 监听窗口大小变化
   window.addEventListener('resize', handleResize);
 }
