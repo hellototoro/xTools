@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+
+const appWindow = getCurrentWindow();
 
 // Types
 interface PortInfo {
@@ -458,18 +461,65 @@ watch(() => config.value.display.font_size, (newVal) => {
     if (fitAddon) fitAddon.fit();
   }
 });
+
+// 窗口控制函数
+async function minimizeWindow() {
+  console.log('minimizeWindow called');
+  try {
+    await appWindow.minimize();
+  } catch (e) {
+    console.error('Failed to minimize:', e);
+  }
+}
+
+async function maximizeWindow() {
+  console.log('maximizeWindow called');
+  try {
+    await appWindow.toggleMaximize();
+  } catch (e) {
+    console.error('Failed to maximize:', e);
+  }
+}
+
+async function closeWindow() {
+  console.log('closeWindow called');
+  try {
+    await appWindow.close();
+  } catch (e) {
+    console.error('Failed to close:', e);
+  }
+}
 </script>
 
 <template>
   <div class="app">
-    <!-- 顶部工具栏 -->
-    <header class="statusbar">
-      <div class="logo">
-        <span class="icon">⚡</span>
-        <span>xTools 串口终端</span>
+    <!-- 自定义标题栏 -->
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="titlebar-content" data-tauri-drag-region>
+        <div class="logo">
+          <span class="icon">⚡</span>
+          <span>xTools 串口终端</span>
+        </div>
+        <div class="status" :class="{ connected }">
+          {{ connected ? "● 已连接" : "○ 未连接" }}
+        </div>
       </div>
-      <div class="status" :class="{ connected }">
-        {{ connected ? "● 已连接" : "○ 未连接" }}
+      <div class="window-controls">
+        <button class="window-btn" @click="minimizeWindow" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12">
+            <rect x="0" y="5" width="12" height="2" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="window-btn" @click="maximizeWindow" title="最大化">
+          <svg width="12" height="12" viewBox="0 0 12 12">
+            <rect x="0" y="0" width="12" height="12" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          </svg>
+        </button>
+        <button class="window-btn close-btn" @click="closeWindow" title="关闭">
+          <svg width="12" height="12" viewBox="0 0 12 12">
+            <path d="M1 1 L11 11 M11 1 L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
       </div>
     </header>
 
@@ -738,7 +788,61 @@ body {
   height: 100vh;
 }
 
-/* Toolbar */
+/* 自定义标题栏 */
+.titlebar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 32px;
+  background: var(--bg-secondary);
+  border-bottom: none;
+  -webkit-app-region: drag;
+}
+
+.titlebar-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex: 1;
+  padding: 0 12px;
+  -webkit-app-region: drag;
+}
+
+.window-controls {
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+  position: relative;
+  z-index: 10;
+}
+
+.window-btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.2s;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  position: relative;
+  z-index: 11;
+}
+
+.window-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.window-btn.close-btn:hover {
+  background: #e81123;
+  color: white;
+}
+
+/* Statusbar (legacy) */
 .statusbar {
   display: flex;
   justify-content: space-between;
@@ -751,13 +855,13 @@ body {
 .logo {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   font-weight: 600;
-  font-size: 16px;
+  font-size: 13px;
 }
 
 .logo .icon {
-  font-size: 20px;
+  font-size: 16px;
 }
 
 .status {
