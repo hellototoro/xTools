@@ -336,7 +336,7 @@ fn cmd_connect(
     match mgr.connect(port, baud, 8, 1, "none") {
         Ok(_) => {
             connected.store(true, Ordering::SeqCst);
-            println!("✓ 已连接到 {} @ {} bps", port, baud);
+            println!("\n✓ 已连接到 {} @ {} bps\n", port, baud);
             CommandResult::EnterTerminal
         }
         Err(e) => CommandResult::Error(e),
@@ -418,8 +418,10 @@ fn run_terminal_mode(
     // 标记进入终端模式，暂停主 REPL 的接收线程
     in_terminal_mode.store(true, Ordering::SeqCst);
     
-    println!("\n\x1b[33m═══ 进入交互式终端模式 ═══\x1b[0m");
-    println!("\x1b[90m提示: 按 Ctrl+] 退出终端模式\x1b[0m\n");
+    println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m");
+    println!("\x1b[1;32m   进入交互式终端模式\x1b[0m");
+    println!("\x1b[1;33m   重要: 按 Ctrl+] 退出到命令行模式\x1b[0m");
+    println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m\n");
     
     // 使用 crossterm 启用原始模式（跨平台）
     if let Err(e) = enable_raw_mode() {
@@ -570,13 +572,15 @@ fn print_help() {
   串口操作:
     list, ls              - 列出可用串口
     connect <串口> [波特率] - 连接串口 (如: connect COM3 115200)
+                             ⚠️  连接后自动进入终端模式
+                             ⚠️  按 Ctrl+] 退出终端模式
     disconnect, disc      - 断开串口连接
     status, st           - 查看连接状态
 
   数据收发:
     send <数据>          - 发送文本数据 (自动添加 \r\n)
     hex <十六进制>       - 发送十六进制数据 (如: hex 48 65 6C 6C 6F)
-    terminal, term       - 进入交互式终端模式 (按 Ctrl+] 退出)
+    terminal, term       - 手动进入交互式终端模式
 
   配置:
     config, cfg          - 查看/设置串口参数
@@ -589,15 +593,16 @@ fn print_help() {
 快捷键:
     Tab                  - 命令自动补全
     Ctrl+C               - 中断/退出
+    Ctrl+]               - 退出终端模式 (重要!)
     ↑/↓                  - 浏览命令历史
 
-示例:
-    xtools> list
-    xtools> connect COM3 115200
-    xtools> terminal              # 进入交互式终端
-    xtools> send Hello World
-    xtools> hex 48 65 6C 6C 6F
-    xtools> disconnect
+工作流程:
+    1. xtools> list                   # 列出串口
+    2. xtools> connect COM3 115200    # 连接 (自动进入终端模式)
+    3. [终端模式] 直接输入交互         # 所有输入发送到串口
+    4. 按 Ctrl+] 退出终端模式          # 返回命令行
+    5. xtools> disconnect             # 断开连接
+    6. xtools> exit                   # 退出程序
     "#);
 }
 

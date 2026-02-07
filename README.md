@@ -66,20 +66,32 @@ xtools
 # 启动 CLI 交互终端（支持 Tab 补全）
 xtools_cli
 
-# 进入后可用命令：
+# 命令行模式 - 可用命令：
 xtools> list                    # 列出串口
-xtools> connect COM3 115200     # 连接串口
-xtools> send Hello World        # 发送文本
-xtools> hex 48 65 6C 6C 6F     # 发送 HEX
+xtools> connect COM3 115200     # 连接串口（自动进入终端模式）
 xtools> status                  # 查看状态
-xtools> disconnect              # 断开连接
 xtools> help                    # 查看帮助
 xtools> exit                    # 退出
+
+# ⚠️ 重要：连接串口后会自动进入终端模式
+# 在终端模式下：
+#   - 所有输入直接发送到串口设备
+#   - 按 Ctrl+] 退出终端模式，返回命令行
+#   - 退出后可使用 disconnect 命令断开连接
+
+# 完整工作流程：
+xtools> list                    # 1. 列出可用串口
+xtools> connect COM3 115200     # 2. 连接串口（进入终端模式）
+[终端模式] 直接输入与串口交互     # 3. 直接输入数据
+[按 Ctrl+] 退出]                # 4. 退出终端模式
+xtools> disconnect              # 5. 断开串口连接
+xtools> exit                    # 6. 退出程序
 
 # 快捷键：
 #   Tab      - 命令自动补全
 #   ↑/↓      - 浏览历史命令
-#   Ctrl+C   - 退出
+#   Ctrl+C   - 中断/退出程序
+#   Ctrl+]   - 退出终端模式（重要！）
 ```
 
 ## 📁 项目结构
