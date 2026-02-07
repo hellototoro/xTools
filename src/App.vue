@@ -251,10 +251,10 @@ function initXterm() {
     fontSize: config.value.display.font_size,
     fontFamily: '"Cascadia Code", "Fira Code", Consolas, monospace',
     theme: {
-      background: '#1a1a2e',
+      background: '#1e1e2e',
       foreground: '#e4e4e7',
       cursor: '#a78bfa',
-      cursorAccent: '#1a1a2e',
+      cursorAccent: '#1e1e2e',
       selectionBackground: 'rgba(167, 139, 250, 0.3)',
     },
     cursorBlink: true,
@@ -463,7 +463,7 @@ watch(() => config.value.display.font_size, (newVal) => {
 <template>
   <div class="app">
     <!-- 顶部工具栏 -->
-    <header class="toolbar">
+    <header class="statusbar">
       <div class="logo">
         <span class="icon">⚡</span>
         <span>xTools 串口终端</span>
@@ -611,7 +611,7 @@ watch(() => config.value.display.font_size, (newVal) => {
       </aside>
 
       <!-- 主区域 -->
-      <main class="content">
+      <main class="content" :class="{ 'content-terminal': config.display.terminal_mode }">
         <!-- 搜索栏 -->
         <div v-if="showSearch" class="search-bar">
           <input
@@ -728,6 +728,8 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .app {
@@ -737,11 +739,11 @@ body {
 }
 
 /* Toolbar */
-.toolbar {
+.statusbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 16px;
+  padding: 6px 16px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
 }
@@ -786,7 +788,7 @@ body {
 .panel {
   background: var(--bg-tertiary);
   border-radius: 8px;
-  padding: 10px;
+  padding: 8px;
   margin-bottom: 10px;
 }
 
@@ -937,6 +939,8 @@ body {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
+  margin: 4px;
+  vertical-align: middle;
 }
 
 .connect-btns {
@@ -996,8 +1000,17 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: 0;
   overflow: hidden;
+}
+
+.content-terminal {
+  padding: 0;
+  background: var(--bg-primary);
+}
+
+.content-terminal .bottom-toolbar {
+  padding: 6px 12px;
 }
 
 /* Search Bar */
@@ -1005,10 +1018,10 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
+  padding: 8px 12px;
   background: var(--bg-secondary);
-  border-radius: 6px;
-  margin-bottom: 8px;
+  border-radius: 0;
+  margin-bottom: 0;
 }
 
 .search-bar input {
@@ -1019,6 +1032,8 @@ body {
   border-radius: 4px;
   color: var(--text-primary);
   font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .search-bar button {
@@ -1039,12 +1054,14 @@ body {
   flex: 1;
   position: relative;
   background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: none;
+  border-radius: 0;
   padding: 12px;
   overflow-y: auto;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
   line-height: 1.6;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .log-entry {
@@ -1092,7 +1109,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 8px;
+  padding: 8px 12px;
 }
 
 .toolbar-row {
@@ -1147,6 +1164,7 @@ body {
 .send-area {
   display: flex;
   gap: 8px;
+  align-items: flex-end;
 }
 
 .send-area textarea {
@@ -1160,6 +1178,8 @@ body {
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
   font-size: 13px;
   resize: none;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .send-area textarea:disabled {
@@ -1168,17 +1188,35 @@ body {
 
 .btn-send {
   width: 80px;
-  height: 80px;
+  height: 40px;
 }
 
 /* Interactive Terminal Mode */
 .terminal-interactive {
   padding: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  overflow: hidden !important;
 }
 
 .xterm-container {
   width: 100%;
   height: 100%;
+}
+
+/* 覆盖 xterm 内部样式，消除多余边框 */
+.terminal-interactive .xterm {
+  padding: 4px 8px;
+}
+
+.terminal-interactive .xterm-viewport {
+  border-radius: 0 !important;
+  background-color: transparent !important;
+}
+
+.terminal-interactive .xterm-screen {
+  background: transparent;
 }
 
 .xterm-hint {
@@ -1187,6 +1225,9 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 10;
+  font-size: 14px;
+  color: var(--text-secondary);
+  letter-spacing: 1px;
 }
 
 /* Scrollbar */
