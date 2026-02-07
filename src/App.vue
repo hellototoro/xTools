@@ -99,12 +99,27 @@ const filteredLog = computed(() => {
   );
 });
 
+// State for refresh animation
+const isRefreshing = ref(false);
+
 // Methods
 async function refreshPorts() {
+  if (isRefreshing.value) return;
+  
   try {
+    isRefreshing.value = true;
     ports.value = await invoke<PortInfo[]>("list_ports");
+    
+    if (config.value.serial.port) {
+      const portExists = ports.value.some(p => p.name === config.value.serial.port);
+      if (!portExists) {
+        config.value.serial.port = "";
+      }
+    }
   } catch (e) {
     console.error("获取串口列表失败:", e);
+  } finally {
+    setTimeout(() => isRefreshing.value = false, 500);
   }
 }
 
@@ -476,7 +491,25 @@ watch(() => config.value.display.font_size, (newVal) => {
                   {{ p.name }} - {{ p.description }}
                 </option>
               </select>
-              <button class="btn-icon" @click="refreshPorts" title="刷新">🔄</button>
+              <button 
+                class="btn-icon btn-refresh" 
+                @click="refreshPorts" 
+                :disabled="isRefreshing"
+                title="刷新端口列表"
+              >
+                <svg 
+                  class="refresh-icon" 
+                  :class="{ spinning: isRefreshing }" 
+                  viewBox="0 0 24 24" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  stroke-width="2" 
+                  stroke-linecap="round" 
+                  stroke-linejoin="round"
+                >
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+              </button>
             </div>
           </div>
 
@@ -845,10 +878,54 @@ body {
   border-radius: 4px;
   cursor: pointer;
   font-size: 14px;
+  transition: all 0.2s;
 }
 
-.btn-icon:hover {
+.btn-icon:hover:not(:disabled) {
   background: var(--bg-tertiary);
+  border-color: var(--accent);
+  transform: scale(1.05);
+}
+
+.btn-icon:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-refresh {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+}
+
+.refresh-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  color: var(--text-primary);
+  transition: color 0.2s;
+}
+
+.refresh-icon.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+.btn-refresh:hover:not(:disabled) .refresh-icon {
+  color: var(--accent);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .checkbox {
