@@ -214,9 +214,6 @@ async function send() {
       direction: "tx",
     });
 
-    if (!config.value.display.terminal_mode) {
-      sendText.value = "";
-    }
     if (config.value.display.auto_scroll) {
       scrollToBottom();
     }
