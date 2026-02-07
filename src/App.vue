@@ -508,7 +508,8 @@ async function closeWindow() {
           <span>xTools 串口终端</span>
         </div>
         <div class="status" :class="{ connected }">
-          {{ connected ? "● 已连接" : "○ 未连接" }}
+          <span class="status-dot">{{ connected ? "🟢" : "⚪" }}</span>
+          <span>{{ connected ? "已连接" : "未连接" }}</span>
         </div>
       </div>
       <div class="window-controls">
@@ -874,10 +875,30 @@ body {
 .status {
   font-size: 14px;
   color: var(--text-secondary);
+  display: flex;
+  align-items: center;
 }
 
 .status.connected {
   color: var(--success);
+}
+
+.status.connected .status-dot {
+  animation: breathe 2s ease-in-out infinite;
+  padding: 6px;
+}
+
+.status:not(.connected) .status-dot {
+  padding: 6px;
+}
+
+@keyframes breathe {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 /* Main Content */
