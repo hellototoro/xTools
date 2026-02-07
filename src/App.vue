@@ -138,6 +138,13 @@ async function connect() {
     connected.value = true;
     startPolling();
     await saveConfig();
+    
+    // 终端模式下自动聚焦
+    if (config.value.display.terminal_mode && xterm) {
+      nextTick(() => {
+        xterm?.focus();
+      });
+    }
   } catch (e: any) {
     alert("连接失败: " + e);
   }
