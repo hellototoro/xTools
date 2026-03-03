@@ -56,6 +56,23 @@ const showSearch = ref(false);
 const searchIndex = ref(-1);
 const customBaudRate = ref(false);
 
+// Modal state
+const modalVisible = ref(false);
+const modalTitle = ref("");
+const modalMessage = ref("");
+const modalType = ref<'success' | 'error' | 'info'>('info');
+
+function showModal(message: string, type: 'success' | 'error' | 'info' = 'info', title?: string) {
+  modalMessage.value = message;
+  modalType.value = type;
+  modalTitle.value = title || (type === 'error' ? '错误' : type === 'success' ? '成功' : '提示');
+  modalVisible.value = true;
+}
+
+function closeModal() {
+  modalVisible.value = false;
+}
+
 const config = ref<AppConfig>({
   serial: {
     port: "",
@@ -146,7 +163,7 @@ async function connect() {
       });
     }
   } catch (e: any) {
-    alert("连接失败: " + e);
+    showModal("连接失败: " + e, 'error');
   }
 }
 
@@ -228,7 +245,7 @@ async function send() {
       scrollToBottom();
     }
   } catch (e: any) {
-    alert("发送失败: " + e);
+    showModal("发送失败: " + e, 'error');
   }
 }
 
@@ -378,9 +395,9 @@ async function saveLog() {
 
   try {
     await invoke("save_log", { path: filename, content });
-    alert(`日志已保存: ${filename}`);
+    showModal(`日志已保存: ${filename}`, 'success');
   } catch (e: any) {
-    alert("保存失败: " + e);
+    showModal("保存失败: " + e, 'error');
   }
 }
 
@@ -756,6 +773,28 @@ async function closeWindow() {
         </div>
       </main>
     </div>
+
+    <!-- 自定义弹窗 -->
+    <Transition name="modal">
+      <div v-if="modalVisible" class="modal-overlay" @click.self="closeModal">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <span class="modal-icon" :class="modalType">
+              <template v-if="modalType === 'error'">✕</template>
+              <template v-else-if="modalType === 'success'">✓</template>
+              <template v-else>ℹ</template>
+            </span>
+            <span class="modal-title">{{ modalTitle }}</span>
+          </div>
+          <div class="modal-body">
+            <p>{{ modalMessage }}</p>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-modal-confirm" :class="modalType" @click="closeModal">确定</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1379,5 +1418,147 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+/* 自定义弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.modal-dialog {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  min-width: 340px;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 24px 0;
+}
+
+.modal-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.modal-icon.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.modal-icon.success {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.modal-icon.info {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 16px 24px;
+}
+
+.modal-body p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 24px 20px;
+}
+
+.btn-modal-confirm {
+  padding: 8px 28px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-modal-confirm.error {
+  background: #ef4444;
+  color: white;
+}
+
+.btn-modal-confirm.error:hover {
+  background: #dc2626;
+}
+
+.btn-modal-confirm.success {
+  background: #10b981;
+  color: white;
+}
+
+.btn-modal-confirm.success:hover {
+  background: #059669;
+}
+
+.btn-modal-confirm.info {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-modal-confirm.info:hover {
+  background: var(--accent-hover);
+}
+
+/* 弹窗动画 */
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.modal-enter-active .modal-dialog,
+.modal-leave-active .modal-dialog {
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-from .modal-dialog {
+  transform: scale(0.92) translateY(10px);
+  opacity: 0;
+}
+
+.modal-leave-to .modal-dialog {
+  transform: scale(0.95);
+  opacity: 0;
 }
 </style>
