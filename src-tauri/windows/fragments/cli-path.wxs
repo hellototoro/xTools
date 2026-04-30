@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="CliUserPathEnvironment" Guid="A7A1A2AC-12FA-4D48-8D58-0D6C4B5D6E11">
+        <RegistryKey Root="HKCU" Key="Software\xTools">
+          <RegistryValue
+            Name="CliUserPathEnvironment"
+            Type="integer"
+            Value="1"
+            KeyPath="yes"
+          />
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

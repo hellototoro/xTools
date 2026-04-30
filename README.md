@@ -63,6 +63,15 @@ xtools
 ### CLI 交互式终端
 
 ```bash
+# 查看帮助
+xtools_cli --help
+
+# 列出可用串口（子命令）
+xtools_cli list
+
+# 直接连接串口并进入终端模式
+xtools_cli connect COM3 115200
+
 # 启动 CLI 交互终端（支持 Tab 补全）
 xtools_cli
 
@@ -93,6 +102,8 @@ xtools> exit                    # 6. 退出程序
 #   Ctrl+C   - 中断/退出程序
 #   Ctrl+]   - 退出终端模式（重要！）
 ```
+
+Windows 安装包会在安装时把 `xtools_cli.exe` 所在目录追加到当前用户的 `PATH`，安装完成后重新打开终端即可直接执行 `xtools_cli`。
 
 ## 📁 项目结构
 

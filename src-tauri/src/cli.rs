@@ -199,7 +199,7 @@ pub fn run_interactive_repl() {
                     }
                     CommandResult::EnterTerminal => {
                         // 连接成功，自动进入终端模式
-                        run_terminal_mode(&manager, &connected, &in_terminal_mode);
+                        run_terminal_mode(&manager, &connected, &in_terminal_mode, false);
                     }
                 }
             }
@@ -414,13 +414,18 @@ fn run_terminal_mode(
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
     in_terminal_mode: &Arc<AtomicBool>,
+    exit_on_ctrl_c: bool,
 ) {
     // 标记进入终端模式，暂停主 REPL 的接收线程
     in_terminal_mode.store(true, Ordering::SeqCst);
     
     println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m");
     println!("\x1b[1;32m   进入交互式终端模式\x1b[0m");
-    println!("\x1b[1;33m   重要: 按 Ctrl+] 退出到命令行模式\x1b[0m");
+    if exit_on_ctrl_c {
+        println!("\x1b[1;33m   提示: 按 Ctrl+C 退出\x1b[0m");
+    } else {
+        println!("\x1b[1;33m   重要: 按 Ctrl+] 退出到命令行模式\x1b[0m");
+    }
     println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m\n");
     
     // 使用 crossterm 启用原始模式（跨平台）
@@ -463,9 +468,18 @@ fn run_terminal_mode(
                     continue;
                 }
                 
-                // Ctrl+] 退出
-                if key_event.modifiers.contains(KeyModifiers::CONTROL) 
-                    && key_event.code == KeyCode::Char(']') 
+                // Ctrl+C 退出（直连模式）
+                if exit_on_ctrl_c
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && key_event.code == KeyCode::Char('c')
+                {
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+
+                // Ctrl+] 退出（REPL 终端模式）
+                if key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    && key_event.code == KeyCode::Char(']')
                 {
                     running.store(false, Ordering::SeqCst);
                     break;
@@ -520,8 +534,53 @@ fn cmd_terminal(
         return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
     }
     
-    run_terminal_mode(manager, connected, in_terminal_mode);
+    run_terminal_mode(manager, connected, in_terminal_mode, false);
     CommandResult::Success(String::new())
+}
+
+// 直接连接串口并进入终端模式（支持 Ctrl+C 退出）
+pub fn run_direct_terminal(port: &str, baud: u32) {
+    let manager = Arc::new(Mutex::new(SerialManager::new()));
+    let connected = Arc::new(AtomicBool::new(false));
+    let in_terminal_mode = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut mgr = manager.lock().unwrap();
+        if let Err(e) = mgr.connect(port, baud, 8, 1, "none") {
+            eprintln!("连接失败: {}", e);
+            return;
+        }
+    }
+
+    connected.store(true, Ordering::SeqCst);
+    println!("已连接到 {} @ {} bps", port, baud);
+    println!("提示: 按 Ctrl+C 退出\n");
+
+    run_terminal_mode(&manager, &connected, &in_terminal_mode, true);
+
+    let mut mgr = manager.lock().unwrap();
+    let _ = mgr.disconnect();
+    println!("\n已断开连接");
+}
+
+// 列出可用串口（命令行子命令）
+pub fn run_list_ports() {
+    match serial::list_available_ports() {
+        Ok(ports) => {
+            if ports.is_empty() {
+                println!("未检测到可用串口");
+                return;
+            }
+
+            println!("可用串口:");
+            for (i, port) in ports.iter().enumerate() {
+                println!("  [{}] {} - {}", i + 1, port.name, port.description);
+            }
+        }
+        Err(e) => {
+            eprintln!("无法获取串口列表: {}", e);
+        }
+    }
 }
 
 fn cmd_config(args: &[&str]) -> CommandResult {
