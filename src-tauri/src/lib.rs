@@ -1,15 +1,17 @@
 pub mod cli;
 pub mod serial;
 pub mod config;
+pub mod session;
 
-use serial::SerialManager;
 use config::AppConfig;
+use serial::{SendPayload, SerialConnectionConfig, SerialEvent};
+use session::{SerialSession, SessionState, WorkMode};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use tauri::State;
 
 pub struct AppState {
-    pub serial_manager: Arc<Mutex<SerialManager>>,
+    pub session: Arc<Mutex<SerialSession>>,
     pub config: Arc<Mutex<AppConfig>>,
 }
 
@@ -23,38 +25,43 @@ fn list_ports() -> Result<Vec<serial::PortInfo>, String> {
 #[tauri::command]
 fn connect_serial(
     state: State<AppState>,
-    port: String,
-    baud_rate: u32,
-    data_bits: u8,
-    stop_bits: u8,
-    parity: String,
+    config: SerialConnectionConfig,
 ) -> Result<(), String> {
-    let mut manager = state.serial_manager.lock();
-    manager.connect(&port, baud_rate, data_bits, stop_bits, &parity)
+    let mut session = state.session.lock();
+    session.connect(&config)
 }
 
 #[tauri::command]
 fn disconnect_serial(state: State<AppState>) -> Result<(), String> {
-    let mut manager = state.serial_manager.lock();
-    manager.disconnect()
+    let mut session = state.session.lock();
+    session.disconnect()
 }
 
 #[tauri::command]
-fn send_data(state: State<AppState>, data: String, hex_mode: bool) -> Result<(), String> {
-    let mut manager = state.serial_manager.lock();
-    manager.send(&data, hex_mode)
+fn send_data(state: State<AppState>, payload: SendPayload) -> Result<SerialEvent, String> {
+    let mut session = state.session.lock();
+    session.send(&payload)
 }
 
 #[tauri::command]
-fn read_data(state: State<AppState>) -> Result<Vec<serial::DataEntry>, String> {
-    let mut manager = state.serial_manager.lock();
-    manager.read_available()
+fn read_serial_events(state: State<AppState>) -> Result<Vec<SerialEvent>, String> {
+    let mut session = state.session.lock();
+    session.read_events()
 }
 
 #[tauri::command]
 fn is_connected(state: State<AppState>) -> bool {
-    let manager = state.serial_manager.lock();
-    manager.is_connected()
+    state.session.lock().state().connected
+}
+
+#[tauri::command]
+fn get_session_state(state: State<AppState>) -> SessionState {
+    state.session.lock().state()
+}
+
+#[tauri::command]
+fn set_work_mode(state: State<AppState>, mode: WorkMode) {
+    state.session.lock().set_mode(mode);
 }
 
 #[tauri::command]
@@ -77,9 +84,10 @@ fn save_log(path: String, content: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config = config::load_config().unwrap_or_default();
+    let mode = config.mode;
     
     let state = AppState {
-        serial_manager: Arc::new(Mutex::new(SerialManager::new())),
+        session: Arc::new(Mutex::new(SerialSession::new(mode))),
         config: Arc::new(Mutex::new(config)),
     };
 
@@ -92,8 +100,10 @@ pub fn run() {
             connect_serial,
             disconnect_serial,
             send_data,
-            read_data,
+            read_serial_events,
             is_connected,
+            get_session_state,
+            set_work_mode,
             get_config,
             save_config,
             save_log,

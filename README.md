@@ -6,9 +6,9 @@
 
 ### 功能特性
 
-- **双模式运行**：支持 GUI 界面和 CLI 命令行两种运行方式
-- **终端模式**：类似真实终端的交互体验
-- **普通模式**：按行发送数据，适合调试
+- **四入口运行**：GUI 和 CLI 都支持终端模式、监视器模式
+- **终端模式**：类似真实终端的交互体验，键盘输入直接转发到串口
+- **监视器模式**：监控串口数据，保留文本/HEX 发送能力
 - **十六进制支持**：发送/接收 HEX 数据
 - **自动滚动**：新数据自动滚动到底部
 - **时间戳显示**：精确到毫秒的时间戳
@@ -70,19 +70,24 @@ xtools_cli --help
 xtools_cli list
 
 # 直接连接串口并进入终端模式
-xtools_cli connect COM3 115200
+xtools_cli terminal COM3 115200
+
+# 直接连接串口并进入监视器模式
+xtools_cli monitor COM3 115200
 
 # 启动 CLI 交互终端（支持 Tab 补全）
 xtools_cli
 
 # 命令行模式 - 可用命令：
 xtools> list                    # 列出串口
-xtools> connect COM3 115200     # 连接串口（自动进入终端模式）
+xtools> connect COM3 115200     # 连接串口（默认监视器模式）
+xtools> mode terminal           # 切换到终端模式
+xtools> terminal                # 进入终端交互
+xtools> mode monitor            # 切换到监视器模式
 xtools> status                  # 查看状态
 xtools> help                    # 查看帮助
 xtools> exit                    # 退出
 
-# ⚠️ 重要：连接串口后会自动进入终端模式
 # 在终端模式下：
 #   - 所有输入直接发送到串口设备
 #   - 按 Ctrl+] 退出终端模式，返回命令行
@@ -90,11 +95,12 @@ xtools> exit                    # 退出
 
 # 完整工作流程：
 xtools> list                    # 1. 列出可用串口
-xtools> connect COM3 115200     # 2. 连接串口（进入终端模式）
-[终端模式] 直接输入与串口交互     # 3. 直接输入数据
-[按 Ctrl+] 退出]                # 4. 退出终端模式
-xtools> disconnect              # 5. 断开串口连接
-xtools> exit                    # 6. 退出程序
+xtools> connect COM3 115200     # 2. 连接串口（监视器模式）
+xtools> terminal                # 3. 进入终端模式
+[终端模式] 直接输入与串口交互     # 4. 直接输入数据
+[按 Ctrl+] 退出]                # 5. 退出终端模式
+xtools> disconnect              # 6. 断开串口连接
+xtools> exit                    # 7. 退出程序
 
 # 快捷键：
 #   Tab      - 命令自动补全
@@ -114,8 +120,10 @@ xTools/
 │   └── main.ts            # 入口
 ├── src-tauri/             # Rust 后端
 │   ├── src/
-│   │   ├── main.rs        # CLI 入口
+│   │   ├── main.rs        # GUI 入口
+│   │   ├── main_cli.rs    # CLI 入口
 │   │   ├── lib.rs         # Tauri 命令
+│   │   ├── session.rs     # 工作模式和串口会话
 │   │   ├── serial.rs      # 串口管理
 │   │   ├── config.rs      # 配置管理
 │   │   └── cli.rs         # CLI 交互

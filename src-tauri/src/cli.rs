@@ -1,4 +1,5 @@
-use crate::serial::{self, SerialManager};
+use crate::serial::{self, SerialConnectionConfig, SerialManager, SendPayload};
+use crate::session::WorkMode;
 use chrono::Local;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -16,8 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-// ============ 命令补全助手 ============
-
 struct XToolsHelper {
     commands: Vec<String>,
 }
@@ -25,29 +24,24 @@ struct XToolsHelper {
 impl XToolsHelper {
     fn new() -> Self {
         Self {
-            commands: vec![
-                "help".to_string(),
-                "list".to_string(),
-                "ls".to_string(),
-                "connect".to_string(),
-                "conn".to_string(),
-                "disconnect".to_string(),
-                "disc".to_string(),
-                "send".to_string(),
-                "s".to_string(),
-                "hex".to_string(),
-                "terminal".to_string(),
-                "term".to_string(),
-                "config".to_string(),
-                "cfg".to_string(),
-                "clear".to_string(),
-                "cls".to_string(),
-                "status".to_string(),
-                "st".to_string(),
-                "exit".to_string(),
-                "quit".to_string(),
-                "q".to_string(),
-            ],
+            commands: [
+                "help",
+                "list",
+                "connect",
+                "disconnect",
+                "send",
+                "hex",
+                "mode",
+                "monitor",
+                "terminal",
+                "status",
+                "clear",
+                "exit",
+                "quit",
+            ]
+            .iter()
+            .map(|cmd| cmd.to_string())
+            .collect(),
         }
     }
 }
@@ -55,27 +49,22 @@ impl XToolsHelper {
 impl Completer for XToolsHelper {
     type Candidate = Pair;
 
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let mut candidates = Vec::new();
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
         let input = &line[..pos];
-        
-        // 如果是第一个单词，补全命令
-        if !input.contains(' ') {
-            for cmd in &self.commands {
-                if cmd.starts_with(input) {
-                    candidates.push(Pair {
-                        display: cmd.clone(),
-                        replacement: cmd.clone(),
-                    });
-                }
-            }
+        if input.contains(' ') {
+            return Ok((0, Vec::new()));
         }
-        
+
+        let candidates = self
+            .commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(input))
+            .map(|cmd| Pair {
+                display: cmd.clone(),
+                replacement: cmd.clone(),
+            })
+            .collect();
+
         Ok((0, candidates))
     }
 }
@@ -87,17 +76,12 @@ impl Hinter for XToolsHelper {
         if line.is_empty() || pos < line.len() {
             return None;
         }
-        
+
         let input = line.trim();
-        
-        // 简单的命令提示
-        for cmd in &self.commands {
-            if cmd.starts_with(input) && cmd != input {
-                return Some(cmd[input.len()..].to_string());
-            }
-        }
-        
-        None
+        self.commands
+            .iter()
+            .find(|cmd| cmd.starts_with(input) && cmd.as_str() != input)
+            .map(|cmd| cmd[input.len()..].to_string())
     }
 }
 
@@ -105,120 +89,58 @@ impl Highlighter for XToolsHelper {}
 impl Validator for XToolsHelper {}
 impl Helper for XToolsHelper {}
 
-// ============ 交互式 REPL ============
-
 pub fn run_interactive_repl() {
     print_banner();
-    
+
     let manager = Arc::new(Mutex::new(SerialManager::new()));
-    let running = Arc::new(AtomicBool::new(true));
     let connected = Arc::new(AtomicBool::new(false));
-    let in_terminal_mode = Arc::new(AtomicBool::new(false));  // 终端模式标志
-    
-    // 串口接收线程（仅在非终端模式时显示）
-    let manager_rx = manager.clone();
-    let running_rx = running.clone();
-    let connected_rx = connected.clone();
-    let in_terminal_rx = in_terminal_mode.clone();
-    
-    thread::spawn(move || {
-        while running_rx.load(Ordering::SeqCst) {
-            // 终端模式时不在这里处理数据
-            if connected_rx.load(Ordering::SeqCst) && !in_terminal_rx.load(Ordering::SeqCst) {
-                let mut mgr = manager_rx.lock().unwrap();
-                match mgr.read_available() {
-                    Ok(entries) => {
-                        for entry in entries {
-                            println!("\r\x1b[K[{}] RX: {}", entry.timestamp, entry.data.trim());
-                            // 不重新打印提示符，让 rustyline 处理
-                        }
-                    }
-                    Err(_) => {}
-                }
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    });
-    
-    // 设置 Ctrl+C 处理
-    let running_ctrlc = running.clone();
-    ctrlc::set_handler(move || {
-        running_ctrlc.store(false, Ordering::SeqCst);
-        println!("\n收到中断信号，正在退出...");
-        std::process::exit(0);
-    })
-    .expect("设置 Ctrl+C 处理失败");
-    
-    // 创建 rustyline 编辑器
-    let helper = XToolsHelper::new();
+    let mode = Arc::new(Mutex::new(WorkMode::Monitor));
+    let running = Arc::new(AtomicBool::new(true));
+
+    start_monitor_reader(manager.clone(), connected.clone(), mode.clone(), running.clone());
+    install_ctrlc_handler(running.clone());
+
     let mut rl = Editor::new().expect("无法创建编辑器");
-    rl.set_helper(Some(helper));
-    
-    // 加载历史
+    rl.set_helper(Some(XToolsHelper::new()));
+
     let history_path = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("xtools")
         .join("history.txt");
-    
     let _ = rl.load_history(&history_path);
-    
-    // 主 REPL 循环
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
-        
-        let readline = rl.readline("xtools> ");
-        
-        match readline {
+
+    while running.load(Ordering::SeqCst) {
+        match rl.readline("xtools> ") {
             Ok(line) => {
                 let input = line.trim();
                 if input.is_empty() {
                     continue;
                 }
-                
-                // 添加到历史
-                rl.add_history_entry(input)
-                    .expect("添加历史失败");
-                
-                let result = handle_command(input, &manager, &connected, &in_terminal_mode);
-                
-                match result {
+
+                let _ = rl.add_history_entry(input);
+                match handle_command(input, &manager, &connected, &mode) {
+                    CommandResult::Success(message) if !message.is_empty() => println!("{}", message),
+                    CommandResult::Success(_) => {}
+                    CommandResult::Error(error) => println!("\x1b[31m错误: {}\x1b[0m", error),
                     CommandResult::Exit => {
-                        println!("再见！");
                         running.store(false, Ordering::SeqCst);
                         break;
                     }
-                    CommandResult::Success(msg) => {
-                        if !msg.is_empty() {
-                            println!("{}", msg);
-                        }
-                    }
-                    CommandResult::Error(err) => {
-                        println!("\x1b[31m错误: {}\x1b[0m", err);
-                    }
                     CommandResult::EnterTerminal => {
-                        // 连接成功，自动进入终端模式
-                        run_terminal_mode(&manager, &connected, &in_terminal_mode, false);
+                        run_terminal_loop(&manager, &connected, false);
+                        *mode.lock().unwrap() = WorkMode::Monitor;
                     }
                 }
             }
-            Err(ReadlineError::Interrupted) => {
-                println!("^C");
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("退出");
-                break;
-            }
-            Err(err) => {
-                eprintln!("错误: {:?}", err);
+            Err(ReadlineError::Interrupted) => println!("^C"),
+            Err(ReadlineError::Eof) => break,
+            Err(error) => {
+                eprintln!("错误: {:?}", error);
                 break;
             }
         }
     }
-    
-    // 保存历史
+
     if let Some(parent) = history_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -229,90 +151,63 @@ enum CommandResult {
     Success(String),
     Error(String),
     Exit,
-    EnterTerminal,  // 连接成功后进入终端模式
+    EnterTerminal,
 }
 
 fn handle_command(
     input: &str,
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
-    in_terminal_mode: &Arc<AtomicBool>,
+    mode: &Arc<Mutex<WorkMode>>,
 ) -> CommandResult {
     let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.is_empty() {
+    let Some((cmd, args)) = parts.split_first() else {
         return CommandResult::Success(String::new());
-    }
-    
-    let cmd = parts[0].to_lowercase();
-    let args = &parts[1..];
-    
-    match cmd.as_str() {
+    };
+
+    match cmd.to_lowercase().as_str() {
         "help" | "h" | "?" => {
             print_help();
             CommandResult::Success(String::new())
         }
-        
-        "list" | "ls" => {
-            cmd_list_ports()
+        "list" | "ls" => cmd_list_ports(),
+        "connect" | "conn" => cmd_connect(args, manager, connected),
+        "disconnect" | "disc" => cmd_disconnect(manager, connected),
+        "send" | "s" => cmd_send(args, manager, connected, false),
+        "hex" => cmd_send(args, manager, connected, true),
+        "mode" => cmd_mode(args, mode),
+        "monitor" => {
+            *mode.lock().unwrap() = WorkMode::Monitor;
+            CommandResult::Success("已切换到监视器模式".to_string())
         }
-        
-        "connect" | "conn" => {
-            cmd_connect(args, manager, connected)
-        }
-        
-        "disconnect" | "disc" => {
-            cmd_disconnect(manager, connected)
-        }
-        
-        "send" | "s" => {
-            cmd_send(args, manager, connected)
-        }
-        
-        "hex" => {
-            cmd_send_hex(args, manager, connected)
-        }
-        
         "terminal" | "term" => {
-            cmd_terminal(manager, connected, in_terminal_mode)
+            if !connected.load(Ordering::SeqCst) {
+                return CommandResult::Error("未连接到串口，请先 connect".to_string());
+            }
+            *mode.lock().unwrap() = WorkMode::Terminal;
+            CommandResult::EnterTerminal
         }
-        
-        "config" | "cfg" => {
-            cmd_config(args)
-        }
-        
+        "status" | "st" => cmd_status(connected, mode),
         "clear" | "cls" => {
             print!("\x1b[2J\x1b[1;1H");
             CommandResult::Success(String::new())
         }
-        
-        "status" | "st" => {
-            cmd_status(connected)
-        }
-        
-        "exit" | "quit" | "q" => {
-            CommandResult::Exit
-        }
-        
-        _ => {
-            CommandResult::Error(format!("未知命令: {}。输入 'help' 查看帮助", cmd))
-        }
+        "exit" | "quit" | "q" => CommandResult::Exit,
+        _ => CommandResult::Error(format!("未知命令: {}。输入 help 查看帮助", cmd)),
     }
 }
 
 fn cmd_list_ports() -> CommandResult {
     match serial::list_available_ports() {
+        Ok(ports) if ports.is_empty() => CommandResult::Success("未检测到可用串口".to_string()),
         Ok(ports) => {
-            if ports.is_empty() {
-                CommandResult::Success("未检测到可用串口".to_string())
-            } else {
-                let mut output = String::from("\n可用串口:\n");
-                for (i, port) in ports.iter().enumerate() {
-                    output.push_str(&format!("  [{}] {} - {}\n", i + 1, port.name, port.description));
-                }
-                CommandResult::Success(output)
+            let mut output = String::from("\n可用串口:\n");
+            for (index, port) in ports.iter().enumerate() {
+                output.push_str(&format!("  [{}] {} - {}\n", index + 1, port.name, port.description));
             }
+            CommandResult::Success(output)
         }
-        Err(e) => CommandResult::Error(e),
+        Err(error) => CommandResult::Error(error),
     }
 }
 
@@ -321,39 +216,33 @@ fn cmd_connect(
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
 ) -> CommandResult {
-    if args.is_empty() {
+    let Some(port) = args.first() else {
         return CommandResult::Error("用法: connect <串口> [波特率]".to_string());
-    }
-    
-    let port = args[0];
-    let baud = if args.len() > 1 {
-        args[1].parse::<u32>().unwrap_or(115200)
-    } else {
-        115200
     };
-    
-    let mut mgr = manager.lock().unwrap();
-    match mgr.connect(port, baud, 8, 1, "none") {
-        Ok(_) => {
+
+    let baud_rate = args.get(1).and_then(|baud| baud.parse().ok()).unwrap_or(115200);
+    let config = SerialConnectionConfig {
+        port: (*port).to_string(),
+        baud_rate,
+        ..SerialConnectionConfig::default()
+    };
+
+    match manager.lock().unwrap().connect_with_config(&config) {
+        Ok(()) => {
             connected.store(true, Ordering::SeqCst);
-            println!("\n✓ 已连接到 {} @ {} bps\n", port, baud);
-            CommandResult::EnterTerminal
+            CommandResult::Success(format!("已连接到 {} @ {} bps，当前为监视器模式", port, baud_rate))
         }
-        Err(e) => CommandResult::Error(e),
+        Err(error) => CommandResult::Error(error),
     }
 }
 
-fn cmd_disconnect(
-    manager: &Arc<Mutex<SerialManager>>,
-    connected: &Arc<AtomicBool>,
-) -> CommandResult {
-    let mut mgr = manager.lock().unwrap();
-    match mgr.disconnect() {
-        Ok(_) => {
+fn cmd_disconnect(manager: &Arc<Mutex<SerialManager>>, connected: &Arc<AtomicBool>) -> CommandResult {
+    match manager.lock().unwrap().disconnect() {
+        Ok(()) => {
             connected.store(false, Ordering::SeqCst);
-            CommandResult::Success("✓ 已断开连接".to_string())
+            CommandResult::Success("已断开连接".to_string())
         }
-        Err(e) => CommandResult::Error(e),
+        Err(error) => CommandResult::Error(error),
     }
 }
 
@@ -361,391 +250,265 @@ fn cmd_send(
     args: &[&str],
     manager: &Arc<Mutex<SerialManager>>,
     connected: &Arc<AtomicBool>,
+    hex_mode: bool,
 ) -> CommandResult {
     if !connected.load(Ordering::SeqCst) {
         return CommandResult::Error("未连接到串口".to_string());
     }
-    
     if args.is_empty() {
-        return CommandResult::Error("用法: send <数据>".to_string());
+        return CommandResult::Error(if hex_mode { "用法: hex <十六进制数据>" } else { "用法: send <数据>" }.to_string());
     }
-    
+
     let data = args.join(" ");
-    let mut mgr = manager.lock().unwrap();
-    
-    match mgr.send(&format!("{}\r\n", data), false) {
-        Ok(_) => {
-            let now = Local::now();
-            let timestamp = now.format("%H:%M:%S%.3f").to_string();
-            CommandResult::Success(format!("[{}] TX: {}", timestamp, data))
-        }
-        Err(e) => CommandResult::Error(e),
+    let payload = SendPayload {
+        data: if hex_mode { data.clone() } else { serial::apply_newline(&data, true, "crlf") },
+        hex_mode,
+    };
+
+    match manager.lock().unwrap().send_payload(&payload) {
+        Ok(event) => CommandResult::Success(format!(
+            "[{}] TX{}: {}",
+            event.timestamp,
+            if hex_mode { " HEX" } else { "" },
+            data
+        )),
+        Err(error) => CommandResult::Error(error),
     }
 }
 
-fn cmd_send_hex(
-    args: &[&str],
-    manager: &Arc<Mutex<SerialManager>>,
-    connected: &Arc<AtomicBool>,
-) -> CommandResult {
-    if !connected.load(Ordering::SeqCst) {
-        return CommandResult::Error("未连接到串口".to_string());
-    }
-    
-    if args.is_empty() {
-        return CommandResult::Error("用法: hex <十六进制数据>".to_string());
-    }
-    
-    let data = args.join(" ");
-    let mut mgr = manager.lock().unwrap();
-    
-    match mgr.send(&data, true) {
-        Ok(_) => {
-            let now = Local::now();
-            let timestamp = now.format("%H:%M:%S%.3f").to_string();
-            CommandResult::Success(format!("[{}] TX HEX: {}", timestamp, data))
+fn cmd_mode(args: &[&str], mode: &Arc<Mutex<WorkMode>>) -> CommandResult {
+    let Some(next_mode) = args.first() else {
+        return CommandResult::Success(format!("当前模式: {:?}", *mode.lock().unwrap()));
+    };
+
+    match next_mode.to_lowercase().as_str() {
+        "terminal" | "term" => {
+            *mode.lock().unwrap() = WorkMode::Terminal;
+            CommandResult::Success("已切换到终端模式，输入 terminal 进入交互".to_string())
         }
-        Err(e) => CommandResult::Error(e),
+        "monitor" | "mon" => {
+            *mode.lock().unwrap() = WorkMode::Monitor;
+            CommandResult::Success("已切换到监视器模式".to_string())
+        }
+        _ => CommandResult::Error("用法: mode terminal|monitor".to_string()),
     }
 }
 
-// 运行交互式终端模式
-fn run_terminal_mode(
-    manager: &Arc<Mutex<SerialManager>>,
-    connected: &Arc<AtomicBool>,
-    in_terminal_mode: &Arc<AtomicBool>,
-    exit_on_ctrl_c: bool,
-) {
-    // 标记进入终端模式，暂停主 REPL 的接收线程
-    in_terminal_mode.store(true, Ordering::SeqCst);
-    
-    println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m");
-    println!("\x1b[1;32m   进入交互式终端模式\x1b[0m");
-    if exit_on_ctrl_c {
-        println!("\x1b[1;33m   提示: 按 Ctrl+C 退出\x1b[0m");
-    } else {
-        println!("\x1b[1;33m   重要: 按 Ctrl+] 退出到命令行模式\x1b[0m");
-    }
-    println!("\x1b[1;32m═══════════════════════════════════════════\x1b[0m\n");
-    
-    // 使用 crossterm 启用原始模式（跨平台）
-    if let Err(e) = enable_raw_mode() {
-        println!("\x1b[31m无法启用原始模式: {}\x1b[0m", e);
-        in_terminal_mode.store(false, Ordering::SeqCst);
-        return;
-    }
-    
-    let running = Arc::new(AtomicBool::new(true));
-    let running_rx = running.clone();
-    let manager_rx = manager.clone();
-    let connected_rx = connected.clone();
-    
-    // 接收线程 - 显示串口数据
-    let rx_handle = thread::spawn(move || {
-        while running_rx.load(Ordering::SeqCst) && connected_rx.load(Ordering::SeqCst) {
-            let mut mgr = manager_rx.lock().unwrap();
-            match mgr.read_available() {
-                Ok(entries) => {
-                    for entry in entries {
-                        // 直接输出数据，不添加时间戳
-                        print!("{}", entry.data);
-                        let _ = io::stdout().flush();
-                    }
-                }
-                Err(_) => {}
-            }
-            drop(mgr);
-            thread::sleep(Duration::from_millis(10));
-        }
-    });
-    
-    // 主循环 - 读取键盘输入并发送 (使用 crossterm 跨平台)
-    loop {
-        if event::poll(Duration::from_millis(10)).unwrap_or(false) {
-            if let Ok(Event::Key(key_event)) = event::read() {
-                // 只处理按下事件，忽略释放和重复事件
-                if key_event.kind != KeyEventKind::Press {
-                    continue;
-                }
-                
-                // Ctrl+C 退出（直连模式）
-                if exit_on_ctrl_c
-                    && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                    && key_event.code == KeyCode::Char('c')
-                {
-                    running.store(false, Ordering::SeqCst);
-                    break;
-                }
-
-                // Ctrl+] 退出（REPL 终端模式）
-                if key_event.modifiers.contains(KeyModifiers::CONTROL)
-                    && key_event.code == KeyCode::Char(']')
-                {
-                    running.store(false, Ordering::SeqCst);
-                    break;
-                }
-                
-                let data = match key_event.code {
-                    KeyCode::Enter => "\r".to_string(),
-                    KeyCode::Backspace => "\x7f".to_string(),
-                    KeyCode::Tab => "\t".to_string(),
-                    KeyCode::Esc => "\x1b".to_string(),
-                    KeyCode::Up => "\x1b[A".to_string(),
-                    KeyCode::Down => "\x1b[B".to_string(),
-                    KeyCode::Right => "\x1b[C".to_string(),
-                    KeyCode::Left => "\x1b[D".to_string(),
-                    KeyCode::Home => "\x1b[H".to_string(),
-                    KeyCode::End => "\x1b[F".to_string(),
-                    KeyCode::Delete => "\x1b[3~".to_string(),
-                    KeyCode::Char(c) => {
-                        if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                            // Ctrl+字母 转换为控制字符
-                            let ctrl_char = (c as u8 & 0x1f) as char;
-                            ctrl_char.to_string()
-                        } else {
-                            c.to_string()
-                        }
-                    }
-                    _ => continue,
-                };
-                
-                let mut mgr = manager.lock().unwrap();
-                let _ = mgr.send(&data, false);
-            }
-        }
-    }
-    
-    let _ = disable_raw_mode();
-    let _ = rx_handle.join();
-    
-    // 退出终端模式
-    in_terminal_mode.store(false, Ordering::SeqCst);
-    
-    println!("\n\x1b[33m═══ 已退出终端模式 ═══\x1b[0m\n");
+fn cmd_status(connected: &Arc<AtomicBool>, mode: &Arc<Mutex<WorkMode>>) -> CommandResult {
+    let connection = if connected.load(Ordering::SeqCst) { "已连接" } else { "未连接" };
+    CommandResult::Success(format!("状态: {}，模式: {:?}", connection, *mode.lock().unwrap()))
 }
 
-// 交互式终端模式命令
-fn cmd_terminal(
-    manager: &Arc<Mutex<SerialManager>>,
-    connected: &Arc<AtomicBool>,
-    in_terminal_mode: &Arc<AtomicBool>,
-) -> CommandResult {
-    if !connected.load(Ordering::SeqCst) {
-        return CommandResult::Error("未连接到串口，请先使用 connect 命令连接".to_string());
-    }
-    
-    run_terminal_mode(manager, connected, in_terminal_mode, false);
-    CommandResult::Success(String::new())
-}
-
-// 直接连接串口并进入终端模式（支持 Ctrl+C 退出）
-pub fn run_direct_terminal(port: &str, baud: u32) {
+pub fn run_direct_terminal(port: &str, baud_rate: u32) {
     let manager = Arc::new(Mutex::new(SerialManager::new()));
     let connected = Arc::new(AtomicBool::new(false));
-    let in_terminal_mode = Arc::new(AtomicBool::new(false));
-
-    {
-        let mut mgr = manager.lock().unwrap();
-        if let Err(e) = mgr.connect(port, baud, 8, 1, "none") {
-            eprintln!("连接失败: {}", e);
-            return;
-        }
-    }
-
-    connected.store(true, Ordering::SeqCst);
-    println!("已连接到 {} @ {} bps", port, baud);
-    println!("提示: 按 Ctrl+C 退出\n");
-
-    run_terminal_mode(&manager, &connected, &in_terminal_mode, true);
-
-    let mut mgr = manager.lock().unwrap();
-    let _ = mgr.disconnect();
-    println!("\n已断开连接");
-}
-
-// 列出可用串口（命令行子命令）
-pub fn run_list_ports() {
-    match serial::list_available_ports() {
-        Ok(ports) => {
-            if ports.is_empty() {
-                println!("未检测到可用串口");
-                return;
-            }
-
-            println!("可用串口:");
-            for (i, port) in ports.iter().enumerate() {
-                println!("  [{}] {} - {}", i + 1, port.name, port.description);
-            }
-        }
-        Err(e) => {
-            eprintln!("无法获取串口列表: {}", e);
-        }
-    }
-}
-
-fn cmd_config(args: &[&str]) -> CommandResult {
-    if args.is_empty() {
-        let output = "
-配置选项:
-  baud <速率>     - 设置波特率 (默认: 115200)
-  data <位数>     - 设置数据位 (5-8)
-  stop <位数>     - 设置停止位 (1-2)
-  parity <类型>   - 设置校验 (none/odd/even)
-
-示例: config baud 9600
-";
-        return CommandResult::Success(output.to_string());
-    }
-    
-    // TODO: 实现配置功能
-    CommandResult::Success("配置已更新（功能待实现）".to_string())
-}
-
-fn cmd_status(connected: &Arc<AtomicBool>) -> CommandResult {
-    let status = if connected.load(Ordering::SeqCst) {
-        "\x1b[32m● 已连接\x1b[0m"
-    } else {
-        "\x1b[31m○ 未连接\x1b[0m"
-    };
-    CommandResult::Success(format!("状态: {}", status))
-}
-
-fn print_banner() {
-    println!(r#"
-    ╔═══════════════════════════════════════════════════╗
-    ║                                                   ║
-    ║      ⚡ xTools CLI - 交互式串口终端 v0.1.0       ║
-    ║                                                   ║
-    ║           🐱 按 Tab 键补全命令 🔌                 ║
-    ║                                                   ║
-    ╚═══════════════════════════════════════════════════╝
-
-    输入 'help' 查看可用命令
-    "#);
-}
-
-fn print_help() {
-    println!(r#"
-可用命令:
-
-  串口操作:
-    list, ls              - 列出可用串口
-    connect <串口> [波特率] - 连接串口 (如: connect COM3 115200)
-                             ⚠️  连接后自动进入终端模式
-                             ⚠️  按 Ctrl+] 退出终端模式
-    disconnect, disc      - 断开串口连接
-    status, st           - 查看连接状态
-
-  数据收发:
-    send <数据>          - 发送文本数据 (自动添加 \r\n)
-    hex <十六进制>       - 发送十六进制数据 (如: hex 48 65 6C 6C 6F)
-    terminal, term       - 手动进入交互式终端模式
-
-  配置:
-    config, cfg          - 查看/设置串口参数
-
-  其他:
-    clear, cls           - 清屏
-    help, h, ?           - 显示帮助
-    exit, quit, q        - 退出程序
-
-快捷键:
-    Tab                  - 命令自动补全
-    Ctrl+C               - 中断/退出
-    Ctrl+]               - 退出终端模式 (重要!)
-    ↑/↓                  - 浏览命令历史
-
-工作流程:
-    1. xtools> list                   # 列出串口
-    2. xtools> connect COM3 115200    # 连接 (自动进入终端模式)
-    3. [终端模式] 直接输入交互         # 所有输入发送到串口
-    4. 按 Ctrl+] 退出终端模式          # 返回命令行
-    5. xtools> disconnect             # 断开连接
-    6. xtools> exit                   # 退出程序
-    "#);
-}
-
-// ============ 旧版 CLI（兼容保留）============
-
-pub fn run_serial_cli(port: Option<String>, baud: u32, terminal_mode: bool) {
-    println!("xTools 串口终端 v0.1.0");
-    println!("========================\n");
-
-    // 列出可用串口
-    match serial::list_available_ports() {
-        Ok(ports) => {
-            if ports.is_empty() {
-                println!("未检测到可用串口");
-                return;
-            }
-            println!("可用串口:");
-            for (i, p) in ports.iter().enumerate() {
-                println!("  [{}] {} - {}", i + 1, p.name, p.description);
-            }
-            println!();
-        }
-        Err(e) => {
-            eprintln!("获取串口列表失败: {}", e);
-            return;
-        }
-    }
-
-    // 确定要使用的串口
-    let port_name = match port {
-        Some(p) => p,
-        None => {
-            print!("请输入串口名称 (如 COM3): ");
-            io::stdout().flush().unwrap();
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap();
-            input.trim().to_string()
-        }
-    };
-
-    if port_name.is_empty() {
-        eprintln!("未指定串口");
+    if connect_direct(&manager, &connected, port, baud_rate).is_err() {
         return;
     }
 
-    // 连接串口
-    let mut manager = SerialManager::new();
-    if let Err(e) = manager.connect(&port_name, baud, 8, 1, "none") {
-        eprintln!("连接失败: {}", e);
+    println!("已连接到 {} @ {} bps", port, baud_rate);
+    println!("提示: 按 Ctrl+C 退出\n");
+    run_terminal_loop(&manager, &connected, true);
+    let _ = manager.lock().unwrap().disconnect();
+}
+
+pub fn run_direct_monitor(port: &str, baud_rate: u32) {
+    let manager = Arc::new(Mutex::new(SerialManager::new()));
+    let connected = Arc::new(AtomicBool::new(false));
+    if connect_direct(&manager, &connected, port, baud_rate).is_err() {
         return;
     }
-
-    println!("已连接到 {} @ {} bps", port_name, baud);
-    println!("模式: {}", if terminal_mode { "终端交互" } else { "普通" });
-    println!("提示: 按 Ctrl+C 退出\n");
 
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    install_ctrlc_handler(running.clone());
+    println!("监视 {} @ {} bps，按 Ctrl+C 退出\n", port, baud_rate);
 
-    // 设置 Ctrl+C 处理
-    let _ = ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!("\n收到中断信号，正在退出...");
-    });
-
-    // 简单的数据接收循环
-    let _stdin = io::stdin();
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            break;
+    while running.load(Ordering::SeqCst) && connected.load(Ordering::SeqCst) {
+        let entries = manager.lock().unwrap().read_available().unwrap_or_default();
+        for entry in entries {
+            println!("[{}] RX: {}", entry.timestamp, entry.text.trim_end());
         }
-
-        // 读取数据
-        match manager.read_available() {
-            Ok(entries) => {
-                for entry in entries {
-                    println!("[{}] RX: {}", entry.timestamp, entry.data.trim());
-                }
-            }
-            Err(_) => {}
-        }
-
         thread::sleep(Duration::from_millis(50));
     }
 
-    println!("\n已断开连接");
+    let _ = manager.lock().unwrap().disconnect();
+}
+
+pub fn run_list_ports() {
+    match cmd_list_ports() {
+        CommandResult::Success(message) => println!("{}", message),
+        CommandResult::Error(error) => eprintln!("无法获取串口列表: {}", error),
+        _ => {}
+    }
+}
+
+fn connect_direct(
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+    port: &str,
+    baud_rate: u32,
+) -> Result<(), String> {
+    let config = SerialConnectionConfig {
+        port: port.to_string(),
+        baud_rate,
+        ..SerialConnectionConfig::default()
+    };
+
+    manager.lock().unwrap().connect_with_config(&config).map(|_| {
+        connected.store(true, Ordering::SeqCst);
+    }).map_err(|error| {
+        eprintln!("连接失败: {}", error);
+        error
+    })
+}
+
+fn run_terminal_loop(
+    manager: &Arc<Mutex<SerialManager>>,
+    connected: &Arc<AtomicBool>,
+    exit_on_ctrl_c: bool,
+) {
+    println!("\x1b[1;32m进入交互式终端模式\x1b[0m");
+    println!(
+        "\x1b[1;33m提示: 按 {} 退出\x1b[0m\n",
+        if exit_on_ctrl_c { "Ctrl+C" } else { "Ctrl+]" }
+    );
+
+    if let Err(error) = enable_raw_mode() {
+        println!("\x1b[31m无法启用原始模式: {}\x1b[0m", error);
+        return;
+    }
+
+    let running = Arc::new(AtomicBool::new(true));
+    let rx_running = running.clone();
+    let rx_manager = manager.clone();
+    let rx_connected = connected.clone();
+    let rx_handle = thread::spawn(move || {
+        while rx_running.load(Ordering::SeqCst) && rx_connected.load(Ordering::SeqCst) {
+            let entries = rx_manager.lock().unwrap().read_available().unwrap_or_default();
+            for entry in entries {
+                print!("{}", entry.text);
+                let _ = io::stdout().flush();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    while running.load(Ordering::SeqCst) {
+        if !event::poll(Duration::from_millis(10)).unwrap_or(false) {
+            continue;
+        }
+
+        let Ok(Event::Key(key_event)) = event::read() else {
+            continue;
+        };
+        if key_event.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        if exit_on_ctrl_c
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.code == KeyCode::Char('c')
+        {
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+
+        if !exit_on_ctrl_c
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.code == KeyCode::Char(']')
+        {
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+
+        if let Some(data) = key_to_serial_data(key_event.code, key_event.modifiers) {
+            let payload = SendPayload { data, hex_mode: false };
+            let _ = manager.lock().unwrap().send_payload(&payload);
+        }
+    }
+
+    let _ = disable_raw_mode();
+    let _ = rx_handle.join();
+    println!("\n\x1b[33m已退出终端模式\x1b[0m\n");
+}
+
+fn key_to_serial_data(code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
+    let data = match code {
+        KeyCode::Enter => "\r".to_string(),
+        KeyCode::Backspace => "\x7f".to_string(),
+        KeyCode::Tab => "\t".to_string(),
+        KeyCode::Esc => "\x1b".to_string(),
+        KeyCode::Up => "\x1b[A".to_string(),
+        KeyCode::Down => "\x1b[B".to_string(),
+        KeyCode::Right => "\x1b[C".to_string(),
+        KeyCode::Left => "\x1b[D".to_string(),
+        KeyCode::Home => "\x1b[H".to_string(),
+        KeyCode::End => "\x1b[F".to_string(),
+        KeyCode::Delete => "\x1b[3~".to_string(),
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) => ((c as u8 & 0x1f) as char).to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        _ => return None,
+    };
+    Some(data)
+}
+
+fn start_monitor_reader(
+    manager: Arc<Mutex<SerialManager>>,
+    connected: Arc<AtomicBool>,
+    mode: Arc<Mutex<WorkMode>>,
+    running: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        while running.load(Ordering::SeqCst) {
+            let is_monitor = *mode.lock().unwrap() == WorkMode::Monitor;
+            if connected.load(Ordering::SeqCst) && is_monitor {
+                let entries = manager.lock().unwrap().read_available().unwrap_or_default();
+                for entry in entries {
+                    println!("\r\x1b[K[{}] RX: {}", entry.timestamp, entry.text.trim_end());
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+fn install_ctrlc_handler(running: Arc<AtomicBool>) {
+    let _ = ctrlc::set_handler(move || {
+        running.store(false, Ordering::SeqCst);
+        println!("\n收到中断信号，正在退出...");
+    });
+}
+
+fn print_banner() {
+    println!(
+        r#"
+xTools CLI - 串口工具
+
+输入 help 查看可用命令。不带参数启动时默认进入 REPL。
+"#
+    );
+}
+
+fn print_help() {
+    println!(
+        r#"
+可用命令:
+  list                         列出可用串口
+  connect <串口> [波特率]       连接串口，默认进入监视器模式
+  monitor                      切换到监视器模式
+  terminal                     进入终端交互模式，Ctrl+] 返回 REPL
+  mode terminal|monitor        设置当前模式
+  send <数据>                  文本发送，自动追加 CRLF
+  hex <十六进制>               HEX 发送
+  disconnect                   断开连接
+  status                       查看状态
+  clear                        清屏
+  exit                         退出
+"#
+    );
+}
+
+#[allow(dead_code)]
+fn now_timestamp() -> String {
+    Local::now().format("%H:%M:%S%.3f").to_string()
 }

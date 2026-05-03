@@ -16,7 +16,7 @@ interface PortInfo {
 
 interface DataEntry {
   timestamp: string;
-  data: string;
+  text: string;
   hex: string;
   direction: string;
 }
@@ -24,27 +24,34 @@ interface DataEntry {
 interface SerialConfig {
   port: string;
   baud_rate: number;
-  custom_baud_rate: number;
   data_bits: number;
   stop_bits: number;
   parity: string;
+}
+
+interface MonitorConfig {
   hex_mode: boolean;
   append_newline: boolean;
   newline_type: string;
-}
-
-interface DisplayConfig {
   auto_scroll: boolean;
   show_timestamp: boolean;
   show_hex: boolean;
   font_size: number;
-  terminal_mode: boolean;
+}
+
+interface TerminalConfig {
+  font_size: number;
+  copy_on_ctrl_c_selection: boolean;
 }
 
 interface AppConfig {
   serial: SerialConfig;
-  display: DisplayConfig;
+  mode: WorkMode;
+  monitor: MonitorConfig;
+  terminal: TerminalConfig;
 }
+
+type WorkMode = "terminal" | "monitor";
 
 // State
 const ports = ref<PortInfo[]>([]);
@@ -77,20 +84,23 @@ const config = ref<AppConfig>({
   serial: {
     port: "",
     baud_rate: 115200,
-    custom_baud_rate: 0,
     data_bits: 8,
     stop_bits: 1,
     parity: "none",
+  },
+  mode: "monitor",
+  monitor: {
     hex_mode: false,
     append_newline: true,
     newline_type: "crlf",
-  },
-  display: {
     auto_scroll: true,
     show_timestamp: true,
     show_hex: false,
     font_size: 14,
-    terminal_mode: false,
+  },
+  terminal: {
+    font_size: 14,
+    copy_on_ctrl_c_selection: true,
   },
 });
 
@@ -114,10 +124,15 @@ const filteredLog = computed(() => {
   const search = searchText.value.toLowerCase();
   return dataLog.value.filter(
     (entry) =>
-      entry.data.toLowerCase().includes(search) ||
+      entry.text.toLowerCase().includes(search) ||
       entry.hex.toLowerCase().includes(search)
   );
 });
+
+const isTerminalMode = computed(() => config.value.mode === "terminal");
+const activeFontSize = computed(() =>
+  isTerminalMode.value ? config.value.terminal.font_size : config.value.monitor.font_size
+);
 
 // State for refresh animation
 const isRefreshing = ref(false);
@@ -146,18 +161,14 @@ async function refreshPorts() {
 async function connect() {
   try {
     await invoke("connect_serial", {
-      port: config.value.serial.port,
-      baudRate: config.value.serial.baud_rate,
-      dataBits: config.value.serial.data_bits,
-      stopBits: config.value.serial.stop_bits,
-      parity: config.value.serial.parity,
+      config: config.value.serial,
     });
     connected.value = true;
     startPolling();
     await saveConfig();
     
     // 终端模式下自动聚焦
-    if (config.value.display.terminal_mode && xterm) {
+    if (isTerminalMode.value && xterm) {
       nextTick(() => {
         xterm?.focus();
       });
@@ -181,16 +192,16 @@ function startPolling() {
   if (pollInterval) return;
   pollInterval = window.setInterval(async () => {
     try {
-      const entries = await invoke<DataEntry[]>("read_data");
+      const entries = await invoke<DataEntry[]>("read_serial_events");
       if (entries.length > 0) {
         dataLog.value.push(...entries);
         // 写入 xterm 终端
         for (const entry of entries) {
           if (entry.direction === 'rx') {
-            writeToXterm(entry.data);
+            writeToXterm(entry.text);
           }
         }
-        if (config.value.display.auto_scroll) {
+        if (config.value.monitor.auto_scroll) {
           scrollToBottom();
         }
       }
@@ -211,8 +222,8 @@ async function send() {
   if (!sendText.value || !connected.value) return;
 
   let data = sendText.value;
-  if (config.value.serial.append_newline) {
-    switch (config.value.serial.newline_type) {
+  if (config.value.monitor.append_newline) {
+    switch (config.value.monitor.newline_type) {
       case "crlf":
         data += "\r\n";
         break;
@@ -226,33 +237,20 @@ async function send() {
   }
 
   try {
-    await invoke("send_data", {
-      data,
-      hexMode: config.value.serial.hex_mode,
+    const event = await invoke<DataEntry>("send_data", {
+      payload: {
+        data,
+        hex_mode: config.value.monitor.hex_mode,
+      },
     });
+    dataLog.value.push({ ...event, text: sendText.value });
 
-    // 添加到日志
-    const now = new Date();
-    const timestamp = now.toTimeString().split(" ")[0] + "." + now.getMilliseconds().toString().padStart(3, "0");
-    dataLog.value.push({
-      timestamp,
-      data: sendText.value,
-      hex: config.value.serial.hex_mode ? sendText.value : stringToHex(sendText.value),
-      direction: "tx",
-    });
-
-    if (config.value.display.auto_scroll) {
+    if (config.value.monitor.auto_scroll) {
       scrollToBottom();
     }
   } catch (e: any) {
     showModal("发送失败: " + e, 'error');
   }
-}
-
-function stringToHex(str: string): string {
-  return Array.from(str)
-    .map((c) => c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"))
-    .join(" ");
 }
 
 function scrollToBottom() {
@@ -275,7 +273,7 @@ function initXterm() {
   if (xterm || !xtermContainerRef.value) return;
   
   xterm = new Terminal({
-    fontSize: config.value.display.font_size,
+    fontSize: config.value.terminal.font_size,
     fontFamily: '"Cascadia Code", "Fira Code", Consolas, monospace',
     theme: {
       background: '#1e1e2e',
@@ -298,7 +296,7 @@ function initXterm() {
   xterm.onData(async (data) => {
     if (!connected.value) return;
     try {
-      await invoke("send_data", { data, hexMode: false });
+      await invoke("send_data", { payload: { data, hex_mode: false } });
     } catch (err) {
       console.error("发送失败:", err);
     }
@@ -307,7 +305,7 @@ function initXterm() {
   // 自定义键盘事件处理器 - 在 xterm 处理之前拦截特殊快捷键
   xterm.attachCustomKeyEventHandler((e) => {
     // Ctrl+C - 复制选中文本
-    if (e.ctrlKey && e.key === 'c' && e.type === 'keydown') {
+    if (config.value.terminal.copy_on_ctrl_c_selection && e.ctrlKey && e.key === 'c' && e.type === 'keydown') {
       const selection = xterm?.getSelection();
       if (selection && selection.trim().length > 0) {
         e.preventDefault();
@@ -329,7 +327,7 @@ function initXterm() {
       navigator.clipboard.readText().then(async (text) => {
         if (text) {
           try {
-            await invoke("send_data", { data: text, hexMode: false });
+            await invoke("send_data", { payload: { data: text, hex_mode: false } });
             console.log('已粘贴:', text);
           } catch (err) {
             console.error('粘贴失败:', err);
@@ -375,7 +373,7 @@ function disposeXterm() {
 
 // 写入数据到 xterm
 function writeToXterm(data: string) {
-  if (xterm && config.value.display.terminal_mode) {
+  if (xterm && isTerminalMode.value) {
     xterm.write(data);
   }
 }
@@ -384,9 +382,9 @@ async function saveLog() {
   const content = dataLog.value
     .map((entry) => {
       const dir = entry.direction === "tx" ? "TX" : "RX";
-      const ts = config.value.display.show_timestamp ? `[${entry.timestamp}] ` : "";
-      const hex = config.value.display.show_hex ? ` | HEX: ${entry.hex}` : "";
-      return `${ts}${dir}: ${entry.data}${hex}`;
+      const ts = config.value.monitor.show_timestamp ? `[${entry.timestamp}] ` : "";
+      const hex = config.value.monitor.show_hex ? ` | HEX: ${entry.hex}` : "";
+      return `${ts}${dir}: ${entry.text}${hex}`;
     })
     .join("\n");
 
@@ -458,7 +456,7 @@ onMounted(async () => {
   await refreshPorts();
   document.addEventListener("keydown", handleKeydown);
   // 如果启动时就是终端模式，初始化 xterm
-  if (config.value.display.terminal_mode) {
+  if (isTerminalMode.value) {
     nextTick(() => initXterm());
   }
 });
@@ -470,8 +468,9 @@ onUnmounted(() => {
 });
 
 // 监听终端模式切换
-watch(() => config.value.display.terminal_mode, (newVal) => {
-  if (newVal) {
+watch(() => config.value.mode, async (newVal) => {
+  await invoke("set_work_mode", { mode: newVal });
+  if (newVal === "terminal") {
     nextTick(() => initXterm());
   } else {
     disposeXterm();
@@ -479,7 +478,7 @@ watch(() => config.value.display.terminal_mode, (newVal) => {
 });
 
 // 监听字体大小变化
-watch(() => config.value.display.font_size, (newVal) => {
+watch(() => config.value.terminal.font_size, (newVal) => {
   if (xterm) {
     xterm.options.fontSize = newVal;
     if (fitAddon) fitAddon.fit();
@@ -591,7 +590,7 @@ async function closeWindow() {
               <select
                 :value="customBaudRate ? -1 : (baudRates.includes(config.serial.baud_rate) ? config.serial.baud_rate : -1)"
                 :disabled="connected"
-                @change="e => { const v = parseInt((e.target as HTMLSelectElement).value); if (v === -1) { customBaudRate = true; if (config.serial.custom_baud_rate > 0) config.serial.baud_rate = config.serial.custom_baud_rate; } else { config.serial.baud_rate = v; customBaudRate = false; } }"
+                @change="e => { const v = parseInt((e.target as HTMLSelectElement).value); if (v === -1) { customBaudRate = true; } else { config.serial.baud_rate = v; customBaudRate = false; } }"
               >
                 <option v-for="b in baudRates" :key="b" :value="b">{{ b }}</option>
                 <option :value="-1">自定义...</option>
@@ -601,8 +600,8 @@ async function closeWindow() {
               v-if="customBaudRate || !baudRates.includes(config.serial.baud_rate)"
               class="custom-baud-input"
               type="text"
-              :value="config.serial.baud_rate > 0 && !baudRates.includes(config.serial.baud_rate) ? config.serial.baud_rate : (config.serial.custom_baud_rate > 0 ? config.serial.custom_baud_rate : '')"
-              @input="e => { const v = parseInt((e.target as HTMLInputElement).value); if (!isNaN(v) && v > 0) { config.serial.baud_rate = v; config.serial.custom_baud_rate = v; } }"
+              :value="config.serial.baud_rate > 0 ? config.serial.baud_rate : ''"
+              @input="e => { const v = parseInt((e.target as HTMLInputElement).value); if (!isNaN(v) && v > 0) config.serial.baud_rate = v; }"
               :disabled="connected"
               placeholder="输入自定义波特率"
             />
@@ -647,48 +646,76 @@ async function closeWindow() {
         </section>
 
         <section class="panel">
-          <h3>显示设置</h3>
+          <h3>模式</h3>
+
+          <div class="mode-switch">
+            <button :class="{ active: config.mode === 'terminal' }" @click="config.mode = 'terminal'">
+              Terminal
+            </button>
+            <button :class="{ active: config.mode === 'monitor' }" @click="config.mode = 'monitor'">
+              Monitor
+            </button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>{{ isTerminalMode ? "终端设置" : "监视器设置" }}</h3>
           
-          <div class="form-group">
+          <template v-if="!isTerminalMode">
+            <div class="form-group">
             <label class="checkbox">
-              <input type="checkbox" v-model="config.display.auto_scroll" />
+              <input type="checkbox" v-model="config.monitor.auto_scroll" />
               <span>自动滚动</span>
             </label>
-          </div>
+            </div>
 
-          <div class="form-group">
+            <div class="form-group">
             <label class="checkbox">
-              <input type="checkbox" v-model="config.display.show_timestamp" />
+              <input type="checkbox" v-model="config.monitor.show_timestamp" />
               <span>显示时间戳</span>
             </label>
-          </div>
+            </div>
 
-          <div class="form-group">
+            <div class="form-group">
             <label class="checkbox">
-              <input type="checkbox" v-model="config.display.show_hex" />
+              <input type="checkbox" v-model="config.monitor.show_hex" />
               <span>显示十六进制</span>
             </label>
-          </div>
+            </div>
+          </template>
 
-          <div class="form-group">
+          <div v-if="isTerminalMode" class="form-group">
             <label class="checkbox">
-              <input type="checkbox" v-model="config.display.terminal_mode" />
-              <span>终端模式</span>
+              <input type="checkbox" v-model="config.terminal.copy_on_ctrl_c_selection" />
+              <span>选中文本时 Ctrl+C 复制</span>
             </label>
           </div>
 
           <div class="form-group">
             <label>字体大小</label>
-            <input type="range" v-model.number="config.display.font_size" min="10" max="24" />
-            <span>{{ config.display.font_size }}px</span>
+            <input
+              v-if="isTerminalMode"
+              type="range"
+              v-model.number="config.terminal.font_size"
+              min="10"
+              max="24"
+            />
+            <input
+              v-else
+              type="range"
+              v-model.number="config.monitor.font_size"
+              min="10"
+              max="24"
+            />
+            <span>{{ activeFontSize }}px</span>
           </div>
         </section>
       </aside>
 
       <!-- 主区域 -->
-      <main class="content" :class="{ 'content-terminal': config.display.terminal_mode }">
+      <main class="content" :class="{ 'content-terminal': isTerminalMode }">
         <!-- 搜索栏 -->
-        <div v-if="showSearch" class="search-bar">
+        <div v-if="showSearch && !isTerminalMode" class="search-bar">
           <input
             v-model="searchText"
             placeholder="搜索..."
@@ -705,33 +732,33 @@ async function closeWindow() {
         <div
           ref="terminalRef"
           class="terminal"
-          :class="{ 'terminal-interactive': config.display.terminal_mode }"
-          :style="{ fontSize: config.display.font_size + 'px' }"
+          :class="{ 'terminal-interactive': isTerminalMode }"
+          :style="{ fontSize: activeFontSize + 'px' }"
         >
           <!-- 传统日志模式 -->
-          <template v-if="!config.display.terminal_mode">
+          <template v-if="!isTerminalMode">
             <div
               v-for="(entry, i) in filteredLog"
               :key="i"
               class="log-entry"
-              :class="[entry.direction, { highlight: searchText && (entry.data.toLowerCase().includes(searchText.toLowerCase()) || entry.hex.toLowerCase().includes(searchText.toLowerCase())) }]"
+              :class="[entry.direction, { highlight: searchText && (entry.text.toLowerCase().includes(searchText.toLowerCase()) || entry.hex.toLowerCase().includes(searchText.toLowerCase())) }]"
             >
-              <span v-if="config.display.show_timestamp" class="timestamp">[{{ entry.timestamp }}]</span>
+              <span v-if="config.monitor.show_timestamp" class="timestamp">[{{ entry.timestamp }}]</span>
               <span class="direction">{{ entry.direction === "tx" ? "TX" : "RX" }}:</span>
-              <span class="data">{{ entry.data }}</span>
-              <span v-if="config.display.show_hex" class="hex">| {{ entry.hex }}</span>
+              <span class="data">{{ entry.text }}</span>
+              <span v-if="config.monitor.show_hex" class="hex">| {{ entry.hex }}</span>
             </div>
           </template>
           <!-- xterm 终端容器 -->
           <div 
-            v-show="config.display.terminal_mode" 
+            v-show="isTerminalMode" 
             ref="xtermContainerRef" 
             class="xterm-container"
           ></div>
-          <div v-if="dataLog.length === 0 && !config.display.terminal_mode" class="empty-hint">
+          <div v-if="dataLog.length === 0 && !isTerminalMode" class="empty-hint">
             等待数据...
           </div>
-          <div v-if="config.display.terminal_mode && !connected" class="empty-hint xterm-hint">
+          <div v-if="isTerminalMode && !connected" class="empty-hint xterm-hint">
             请先连接串口...
           </div>
         </div>
@@ -739,16 +766,16 @@ async function closeWindow() {
         <!-- 底部工具栏 -->
         <div class="bottom-toolbar">
           <div class="toolbar-row">
-            <div v-if="!config.display.terminal_mode" class="send-settings">
+            <div v-if="!isTerminalMode" class="send-settings">
               <label class="checkbox-inline">
-                <input type="checkbox" v-model="config.serial.hex_mode" />
+                <input type="checkbox" v-model="config.monitor.hex_mode" />
                 <span>HEX</span>
               </label>
               <label class="checkbox-inline">
-                <input type="checkbox" v-model="config.serial.append_newline" />
+                <input type="checkbox" v-model="config.monitor.append_newline" />
                 <span>换行</span>
               </label>
-              <select v-if="config.serial.append_newline" v-model="config.serial.newline_type" class="select-small">
+              <select v-if="config.monitor.append_newline" v-model="config.monitor.newline_type" class="select-small">
                 <option v-for="opt in newlineOptions" :key="opt.value" :value="opt.value">
                   {{ opt.label }}
                 </option>
@@ -759,10 +786,10 @@ async function closeWindow() {
               <button class="btn btn-small" @click="saveLog">保存日志</button>
             </div>
           </div>
-          <div v-if="!config.display.terminal_mode" class="send-area">
+          <div v-if="!isTerminalMode" class="send-area">
             <textarea
               v-model="sendText"
-              :placeholder="config.serial.hex_mode ? '输入十六进制数据 (如: 48 65 6C 6C 6F)' : '输入要发送的内容...'"
+              :placeholder="config.monitor.hex_mode ? '输入十六进制数据 (如: 48 65 6C 6C 6F)' : '输入要发送的内容...'"
               @keydown.ctrl.enter="send"
               :disabled="!connected"
             ></textarea>
@@ -970,6 +997,32 @@ body {
   margin-bottom: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.mode-switch button {
+  height: 30px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mode-switch button.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .form-group {
